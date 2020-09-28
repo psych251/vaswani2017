@@ -1,0 +1,106 @@
+---
+title: "Replication of Attention Is All You Need (2017, NIPS Proceedings)"
+author: "Satchel Grant (email: grantsrb@stanford.edu)"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+---
+
+<!-- Replication reports should all use this template to standardize reporting across projects.  These reports will be public supplementary materials that accompany the summary report(s) of the aggregate results. -->
+
+##Introduction
+
+[No abstract is needed.]  Each replication project will have a straightforward, no frills report of the study and results.  These reports will be publicly available as supplementary material for the aggregate report(s) of the project as a whole.  Also, to maximize project integrity, the intro and methods will be written and critiqued in advance of data collection.  Introductions can be just 1-2 paragraphs clarifying the main idea of the original study, the target finding for replication, and any other essential information.  It will NOT have a literature review -- that is in the original publication. You can write both the introduction and the methods in past tense.  
+
+Attention is All You Need introduces an algorithm for sequence to sequence modeling that serves as the basis for much of the recent successes in language modeling (Brown 2020), image to sequence tasks (Herdade 2019), and zero shot learning in language domains (Brown 2020). The attention mechanism introduced in the paper also has been used to improve Reinforcement Learning algorithms giving them more selective resource allocation (Mott 2019).
+
+I selected Vaswani 2017 as my replication paper because the Transformer algorithm introduced in the paper is foundational to my research interests. My immediate research goal is to create a computational model that is capable of interacting with multiple virtual modalities such as gesture, vision, and language comprehension, and is able to reason in an online setting. Transformers offer a viable method to incorporate multiple modalities into a single algorithm, and are the state of the art in zero-shot, pattern learning, computational systems. It is of utmost importance that I am able to recreate their results as a way of testing that my code is correct. The specific results that I want to recreate are the performances for the base model in tables 2 and 3. These BLEU scores and perplexities should serve as an appropriate benchmark for having accurate code.
+
+To conduct this experiment, I will need to use the WMT 2014 English-German and the WMT 2014 English-French datasets. I will need to build an efficient data-pipeline that encodes the data using byte-pair encoding and feeds the data to a model for training and inference. I will need to code the multi-headed attention mechanism and from this build the encoder and decoder blocks that make up the Transformer architecture. I will need to build a project infrastructure that can combine all of these parts together for training and testing. The challenges of the project will be ensuring bug-free and scalable code that can easily be reused and re-purposed for other projects.
+
+The reproduced project is located [here]() and the original paper can be found [here]().
+
+
+
+
+##Methods
+
+###Power Analysis
+
+Original effect size, power analysis for samples to achieve 80%, 90%, 95% power to detect that effect size.  Considerations of feasibility for selecting planned sample size.
+
+###Planned Sample
+
+Planned sample size and/or termination rule, sampling frame, known demographics if any, preselection rules if any.
+
+###Materials
+
+All materials - can quote directly from original article - just put the text in quotations and note that this was followed precisely.  Or, quote directly and just point out exceptions to what was described in the original article.
+
+###Procedure	
+
+Can quote directly from original article - just put the text in quotations and note that this was followed precisely.  Or, quote directly and just point out exceptions to what was described in the original article.
+
+###Analysis Plan
+
+Can also quote directly, though it is less often spelled out effectively for an analysis strategy section.  The key is to report an analysis strategy that is as close to the original - data cleaning rules, data exclusion rules, covariates, etc. - as possible.  
+
+**Clarify key analysis of interest here**  You can also pre-specify additional analyses you plan to do.
+
+###Differences from Original Study
+
+Explicitly describe known differences in sample, setting, procedure, and analysis plan from original study.  The goal, of course, is to minimize those differences, but differences will inevitably occur.  Also, note whether such differences are anticipated to make a difference based on claims in the original article or subsequent published research on the conditions for obtaining the effect.
+
+### Methods Addendum (Post Data Collection)
+
+You can comment this section out prior to final report with data collection.
+
+#### Actual Sample
+  Sample size, demographics, data exclusions based on rules spelled out in analysis plan
+
+#### Differences from pre-data collection methods plan
+  Any differences from what was described as the original plan, or “none”.
+
+
+##Results
+
+
+### Data preparation
+
+Data preparation following the analysis plan.
+	
+```{r include=F}
+###Data Preparation
+
+####Load Relevant Libraries and Functions
+
+####Import data
+
+#### Data exclusion / filtering
+
+#### Prepare data for analysis - create columns etc.
+```
+
+### Confirmatory analysis
+
+The analyses as specified in the analysis plan.  
+
+*Side-by-side graph with original graph is ideal here*
+
+###Exploratory analyses
+
+Any follow-up analyses desired (not required).  
+
+## Discussion
+
+### Summary of Replication Attempt
+
+Open the discussion section with a paragraph summarizing the primary result from the confirmatory analysis and the assessment of whether it replicated, partially replicated, or failed to replicate the original result.  
+
+### Commentary
+
+Add open-ended commentary (if any) reflecting (a) insights from follow-up exploratory analysis, (b) assessment of the meaning of the replication (or not) - e.g., for a failure to replicate, are the differences between original and present study ones that definitely, plausibly, or are unlikely to have been moderators of the result, and (c) discussion of any objections or challenges raised by the current and original authors about the replication attempt.  None of these need to be long.
