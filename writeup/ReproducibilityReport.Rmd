@@ -1,0 +1,95 @@
+---
+title: "Reproducibility Report for Study X by Sample & Sample (20xx, Psychological Science)"
+author: "Reproducibility Project Author[s] (contact information)"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+---
+
+<!-- Reproducibility reports should all use this template to standardize reporting across projects. These reports will be public supplementary materials that accompany the summary report(s) of the aggregate results. -->
+## Introduction
+
+Attention is All You Need introduces an algorithm for sequence to sequence modeling that serves as the basis for much of the recent successes in language modeling (Brown 2020), image to sequence tasks (Herdade 2019), and zero shot learning in language domains (Brown 2020). The attention mechanism introduced in the paper also has been used to improve Reinforcement Learning algorithms giving them more selective resource allocation (Mott 2019). The specific results that I want to recreate are the performances for the base model in tables 2 and 3. 
+
+
+### Justification for choice of study
+
+I selected Vaswani 2017 as my replication paper because the Transformer algorithm introduced in the paper is foundational to my research interests. My immediate research goal is to create a computational model that is capable of interacting with multiple virtual modalities such as gesture, vision, and language comprehension, and is able to reason in an online setting. Transformers offer a viable method to incorporate multiple modalities into a single algorithm, and are the state of the art in zero-shot, pattern learning, computational systems. It is of utmost importance that I am able to recreate their results as a way of testing that my code is correct. The BLEU scores and perplexities from tables 2 and 3 should serve as an appropriate benchmark for having accurate code.
+
+### Anticipated challenges
+
+To conduct this experiment, I will need to use the WMT 2014 English-German and the WMT 2014 English-French datasets. I will need to build an efficient data-pipeline that encodes the data using byte-pair encoding and feeds the data to a model for training and inference. I will need to code the multi-headed attention mechanism and from this build the encoder and decoder blocks that make up the Transformer architecture. I will need to build a project infrastructure that can combine all of these parts together for training and testing. The challenges of the project will be ensuring bug-free and scalable code that can easily be reused and re-purposed for other projects.
+
+Additionally, finding the appropriate GPU resources will be difficult for this project. The authors report using 8 NVIDIA P100 GPUs. Obtaining access to this many GPUs may be difficult, in which case I will need to code an efficient way to perform model updates on fewer GPUs.
+
+
+### Links
+
+Project repository (on Github): [https://github.com/psych251/vaswani2017](https://github.com/psych251/vaswani2017)
+
+Original paper (as hosted in your repo): [here](https://github.com/psych251/vaswani2017/blob/master/original_paper/Vaswani-AttentionIsAllYouNeed.pdf)
+
+## Methods
+
+### Description of the steps required to reproduce the results
+
+The necessary steps to reproduce the results of Vaswani et. al. are the following:
+
+1. Download the translation datasets
+2. Create pipeline to efficiently read datasets into project
+3. Create algorithm or find appropriate library for byte-pair encoding
+4. Create Transformer code base, defining the model architecture and training scheme
+5. Obtain access to 8 NVIDIA P100 GPUs or use gradient storing to train on fewer GPUs for a longer period of time.
+6. Validate and test trained models once complete.
+
+### Differences from original study
+
+Explicitly describe known differences in the analysis pipeline between the original paper and yours (e.g., computing environment). The goal, of course, is to minimize those differences, but differences may occur. Also, note whether such differences are anticipated to influence your ability to reproduce the original results.
+
+The main potential difference between the environment used in the original paper and my proposed reproduction will be the available computational resources. Luckily the model architecture is defined in such a way that there are no computations that require the full training batch. This allows me to split the training batches into sub-batches for gradient computations. These gradients can be stored over multiple sub-batches which allows us to obtain gradients that are computationally equivalent to those obtained with larger batch sizes. The cost of this approach is an increase in the time it takes to train a single model.
+
+Another difference will be the way I do my random seeding. I do not believe Vaswani et. al. report their random seeds. And even if they did, even slight differences in the code structure could lead to different random sampling. This will inherently make the reproducibility stochastic.
+
+## Results
+
+### Data preparation
+
+See [this script]() for the code that performs the data preparation.
+
+Data preparation following the analysis plan.
+	
+```{r include=F}
+### Data Preparation
+
+#### Load Relevant Libraries and Functions
+
+#### Import data
+
+#### Data exclusion / filtering
+
+#### Prepare data for analysis - create columns etc.
+```
+
+### Key analysis
+
+The analyses as specified in the analysis plan.  
+
+*Side-by-side graph with original graph is ideal here*
+
+###Exploratory analyses
+
+Any follow-up analyses desired (not required).  
+
+## Discussion
+
+### Summary of Reproduction Attempt
+
+Open the discussion section with a paragraph summarizing the primary result from the key analysis and assess whether you successfully reproduced it, partially reproduced it, or failed to reproduce it.  
+
+### Commentary
+
+Add open-ended commentary (if any) reflecting (a) insights from follow-up exploratory analysis of the dataset, (b) assessment of the meaning of the successful or unsuccessful reproducibility attempt - e.g., for a failure to reproduce the original findings, are the differences between original and present analyses ones that definitely, plausibly, or are unlikely to have been moderators of the result, and (c) discussion of any objections or challenges raised by the current and original authors about the reproducibility attempt (if you contacted them).  None of these need to be long.
