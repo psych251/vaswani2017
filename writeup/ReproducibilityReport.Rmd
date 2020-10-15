@@ -1,6 +1,6 @@
 ---
-title: "Reproducibility Report for Study X by Sample & Sample (20xx, Psychological Science)"
-author: "Reproducibility Project Author[s] (contact information)"
+title: "Reproducibility Report for Attention is All You Need by Vaswani et. al. (2017, NIPS Proceedings)"
+author: "Satchel Grant (grantsrb@stanford.edu)"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output:
   html_document:
@@ -58,7 +58,7 @@ Another difference will be the way I do my random seeding. I do not believe Vasw
 
 ### Data preparation
 
-See [this script]() for the code that performs the data preparation.
+See [this script](https://github.com/psych251/vaswani2017/blob/master/transformer/transformer/datas.py) for the code that performs the data preparation (actual data prep not yet implemented).
 
 Data preparation following the analysis plan.
 	
