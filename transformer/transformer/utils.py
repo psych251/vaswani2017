@@ -33,30 +33,21 @@ def load_json(file_name):
         j = json.loads(s)
     return j
 
-def resize2Square(img, size):
+def sample_probs(mu_sig, min_sig=0.00001, dim=-1):
     """
-    resizes image to a square with the argued size. Preserves the aspect
-    ratio.
+    samples from a gaussian distribution using the parameters
+    stored in the latns
 
-    img: ndarray (H,W, optional C)
-    size: int
+    mu_sig: torch FloatTensor (...,Mu+Sig)
+        the means and the standard deviations for a gaussian.
+        the vector will be split halfway on the argued dimension
+        with the assumption that the means are located first.
+    min_sig: float
+        the minimum value sigma can take on
+    dim: int
+        the dimension that the split should occur on
     """
-    h, w = img.shape[:2]
-    c = None if len(img.shape) < 3 else img.shape[2]
-    if h == w: 
-        return cv2.resize(img, (size, size), cv2.INTER_AREA)
-    if h > w: 
-        dif = h
-    else:
-        dif = w
-    interpolation = cv2.INTER_AREA if dif > size else\
-                    cv2.INTER_CUBIC
-    x_pos = int((dif - w)/2.)
-    y_pos = int((dif - h)/2.)
-    if c is None:
-      mask = np.zeros((dif, dif), dtype=img.dtype)
-      mask[y_pos:y_pos+h, x_pos:x_pos+w] = img[:h, :w]
-    else:
-      mask = np.zeros((dif, dif, c), dtype=img.dtype)
-      mask[y_pos:y_pos+h, x_pos:x_pos+w, :] = img[:h, :w, :]
-    return cv2.resize(mask, (size, size), interpolation)
+    mu,sig = torch.chunk(mu_sig, 2, dim=dim)
+    sig = F.softplus(sig)+min_sig
+    return mu + torch.randn_like(sig)*sig
+

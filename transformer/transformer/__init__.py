@@ -1,2 +1,2 @@
 __version__ = '0.1.0'
-from . import datas, utils, models, training
+from . import custom_modules, datas, utils, models, training

@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import ReLU, Tanh, Softplus
 import torch.nn.functional as F
 import numpy as np
+from transformer.utils import sample_probs
 
 d = {i:"cuda:"+str(i) for i in range(torch.cuda.device_count())}
 DEVICE_DICT = {-1:"cpu", **d}
@@ -11,24 +12,6 @@ if torch.cuda.is_available():
     DEVICE = torch.device("cuda:0")
 else:
     DEVICE = torch.device("cpu")
-
-def sample_probs(mu_sig, min_sig=0.00001, dim=-1):
-    """
-    samples from a gaussian distribution using the parameters
-    stored in the latns
-
-    mu_sig: torch FloatTensor (...,Mu+Sig)
-        the means and the standard deviations for a gaussian.
-        the vector will be split halfway on the argued dimension
-        with the assumption that the means are located first.
-    min_sig: float
-        the minimum value sigma can take on
-    dim: int
-        the dimension that the split should occur on
-    """
-    mu,sig = torch.chunk(mu_sig, 2, dim=dim)
-    sig = F.softplus(sig)+min_sig
-    return mu + torch.randn_like(sig)*sig
 
 class PositionalEncoder(nn.Module):
     def __init__(self, seq_len, emb_size):
@@ -149,15 +132,17 @@ class MultiHeadAttention(nn.Module):
         batch,seq_q = q.shape[:2]
         fq = fq.reshape(batch, seq_q, self.n_heads, self.qk_attn_size) 
         fq = fq.permute(0,2,1,3) # (B,H,Sq, A)
-        fq = sample_probs(fq)
 
         batch,seq_k = k.shape[:2]
         fk = fk.reshape(batch, seq_k, self.n_heads, self.qk_attn_size) 
         fk = fk.permute(0,2,3,1) # (B,H,A,Sk)
-        fk = sample_probs(fk,dim=-2)
         # seq_k should always be equal to seq_v
         fv = fv.reshape(batch, seq_k, self.n_heads, self.attn_size) 
         fv = fv.permute(0,2,1,3) # (B,H,Sk,A)
+
+        if self.prob_attn:
+            fk = sample_probs(fk,dim=-2)
+            fq = sample_probs(fq)
 
         f = torch.matmul(fq,fk)/np.sqrt(self.attn_size) # (B,H,Sq,Sk)
         if mask is not None:
@@ -176,6 +161,7 @@ class MultiHeadAttention(nn.Module):
         attns = attns.reshape(batch,seq_q,-1)
         return self.outs(attns)
 
+
 class Sin(nn.Module):
     def __init__(self):
         """
@@ -186,3 +172,18 @@ class Sin(nn.Module):
     def forward(self, x):
         return torch.sin(x)
 
+class Multiply(nn.Module):
+    """
+    This is a wrapper module to multiply the activations be a specific
+    amount.
+    """
+    def __init__(self, multiplier):
+        """
+        multiplier: float or FloatTensor
+            the value to multiply the activations with
+        """
+        super().__init__()
+        self.multiplier = multiplier
+
+    def forward(self, x):
+        return x*self.multiplier

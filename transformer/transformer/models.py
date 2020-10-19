@@ -5,10 +5,56 @@ import numpy as np
 import time
 import os
 import torch.nn.functional as F
-from crab.custom_modules import *
+from transformer.custom_modules import *
 
 d = {i:"cuda:"+str(i) for i in range(torch.cuda.device_count())}
 DEVICE_DICT = {-1:"cpu", **d}
+
+class ECoderBase(nn.Module):
+    """
+    This is a base class to consolidate most of the common parameters
+    in the encoder and decoder modules. This makes it easier to make
+    variations for other projects.
+    """
+    def __init__(self, seq_len, emb_size, attn_size, n_layers,
+                                                     n_heads,
+                                                     use_mask=False,
+                                                     act_fxn="ReLU",
+                                                     prob_embs=False,
+                                                     prob_attn=False,
+                                                     **kwargs):
+        """
+        seq_len: int
+            the length of the sequences to be analyzed
+        emb_size: int
+            the size of the embeddings
+        attn_size: int
+            the size of the projected spaces in the attention layers
+        n_layers: int
+            the number of encoding layers
+        n_heads: int
+            the number of attention heads
+        use_mask: bool
+            if true, a no-peak mask is applied so that elements later
+            in the decoding sequence are hidden from elements earlier
+            in the decoding
+        prob_embs: bool
+            if true, embedding vectors are treated as parameter
+            vectors for gaussian distributions
+        prob_attn: bool
+            if true, the queries and keys are projected into a
+            gaussian parameter vectors space and sampled
+        """
+        super().__init__()
+        self.seq_len = seq_len
+        self.emb_size = emb_size
+        self.attn_size = attn_size
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.act_fxn = act_fxn
+        self.use_mask = use_mask
+        self.prob_embs = prob_embs
+        self.prob_attn = prob_attn
 
 class EncodingBlock(nn.Module):
     def __init__(self, emb_size, attn_size, n_heads=8,
@@ -73,13 +119,11 @@ class EncodingBlock(nn.Module):
             fx = self.proj(fx)
         return fx
 
-class Encoder(nn.Module):
-    def __init__(self, seq_len, emb_size, attn_size, n_layers,n_heads,
-                                                     use_mask=False,
-                                                     act_fxn="ReLU",
-                                                     prob_embs=False,
-                                                     prob_attn=False):
+class Encoder(ECoderBase):
+    def __init__(self, *args, **kwargs):
         """
+        See ECoderBase for argument details
+
         seq_len: int
             the length of the sequences to be analyzed
         emb_size: int
@@ -103,29 +147,23 @@ class Encoder(nn.Module):
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
         """
-        super().__init__()
-        self.seq_len = seq_len
-        self.emb_size = emb_size
-        self.attn_size = attn_size
-        self.n_layers = n_layers
-        self.n_heads = n_heads
-        self.act_fxn = act_fxn
-        self.use_mask = use_mask
-        self.prob_embs = prob_embs
-        self.prob_attn = prob_attn
+        super().__init__(*args, **kwargs)
+        if self.use_mask:
+            print("encoder is using a mask, this is likely undesired!")
 
-        self.pos_encoding = PositionalEncoder(seq_len, emb_size)
-        mask = self.get_mask(x.shape[1]) if self.use_mask else None
+        self.pos_encoding = PositionalEncoder(self.seq_len,self.emb_size)
+        mask = self.get_mask(self.seq_len) if self.use_mask else None
         self.register_buffer("mask",mask)
         self.enc_layers = nn.ModuleList([])
-        for _ in range(n_layers):
-            block = EncodingBlock(emb_size=emb_size,
-                                  attn_size=attn_size,
-                                  n_heads=n_heads,
-                                  act_fxn=act_fxn,
+        for _ in range(self.n_layers):
+            block = EncodingBlock(emb_size=self.emb_size,
+                                  attn_size=self.attn_size,
+                                  n_heads=self.n_heads,
+                                  act_fxn=self.act_fxn,
                                   prob_embs=self.prob_embs,
                                   prob_attn=self.prob_attn)
             self.enc_layers.append(block)
+
 
     def forward(self,x,x_mask=None):
         """
@@ -134,14 +172,18 @@ class Encoder(nn.Module):
         x_mask: torch tensor (B,S)
             a mask to prevent some tokens from influencing the output
         """
-        if x.shape[1] != self.seq_len:
+        # Resize mask in case x is of unusual sequence length
+        if self.mask is not None and x.shape[1] != self.mask.shape[0]:
             mask = self.get_mask(x.shape[1])
             mask = mask.to(DEVICE_DICT[x.get_device()])
             self.register_buffer("mask",mask)
         else:
             mask = self.mask
+        # Sample embedding vectors if using stochastic paradigm
         if self.prob_embs:
             x = sample_probs(x)
+
+        # Encode
         fx = self.pos_encoding(x)
         for i,enc in enumerate(self.enc_layers):
             fx = enc(fx,mask=mask,x_mask=x_mask)
@@ -150,6 +192,18 @@ class Encoder(nn.Module):
         return fx
 
     def get_mask(self, seq_len):
+        """
+        Creates mask that looks like the following with rows and columns
+        of length seq_len:
+
+        [0,-1e9,-1e9,-1e9]
+        [0,   0,-1e9,-1e9]
+        [0,   0,   0,-1e9]
+        [0,   0,   0,   0]
+
+        seq_len: int
+            the side length of the mask square
+        """
         mask = torch.FloatTensor(np.tri(seq_len,seq_len))
         mask = mask.masked_fill(mask==0,-1e10)
         mask[mask==1] = 0
@@ -222,6 +276,7 @@ class DecodingBlock(nn.Module):
             a mask to prevent some tokens from influencing the output
         """
 
+        x = self.norm0(x)
         fx = self.multi_attn1(q=x,k=x,v=x,mask=mask,
                                           q_mask=x_mask,
                                           k_mask=x_mask)
@@ -236,74 +291,47 @@ class DecodingBlock(nn.Module):
             fx = self.proj(fx)
         return fx
 
-class Decoder(nn.Module):
-    def __init__(self, seq_len, emb_size, attn_size, n_layers,
-                                                     n_heads,
-                                                     use_mask=False,
-                                                     act_fxn="ReLU",
-                                                     gen_decs=False,
-                                                     init_decs=False,
-                                                     prob_embs=False,
-                                                     prob_attn=False):
+class Decoder(ECoderBase):
+    def __init__(self, *args, init_decs=False, multi_init=False,
+                                               **kwargs):
         """
-        seq_len: int
-            the length of the sequences to be analyzed
-        emb_size: int
-            the size of the embeddings
-        attn_size: int
-            the size of the projected spaces in the attention layers
-        n_layers: int
-            the number of encoding layers
-        n_heads: int
-            the number of attention heads
-        use_mask: bool
-            if true, a no-peak mask is applied so that elements later
-            in the decoding sequence are hidden from elements earlier
-            in the decoding
-        gen_decs: bool
-            if true, decodings are generated individually and used
-            as the inputs for later decodings. (stands for generate
-            decodings). This ensures earlier attention values are
-            completely unaffected by later inputs.
+        See ECoderBase for details on kwarg arguments
+
         init_decs: bool
             if true, an initialization decoding vector is learned as
             the initial input to the decoder.
-        prob_embs: bool
-            if true, embedding vectors are treated as parameter
-            vectors for gaussian distributions
-        prob_attn: bool
-            if true, the queries and keys are projected into a
-            gaussian parameter vectors space and sampled
+        multi_init: bool
+            if true, the initialization vector has a unique value for
+            each slot in the generated sequence. Only applies if
+            init_decs is true
         """
-        super().__init__()
-        self.seq_len = seq_len
-        self.emb_size = emb_size
-        self.attn_size = attn_size
-        self.n_layers = n_layers
-        self.n_heads = n_heads
-        self.act_fxn = act_fxn
-        self.use_mask = use_mask
-        self.gen_decs = gen_decs
+        super().__init__(*args, **kwargs)
         self.init_decs = init_decs
-        self.prob_embs = prob_embs
-        self.prob_attn = prob_attn
+        self.multi_init = multi_init
 
-        mask = self.get_mask(seq_len, bidirectional=False) if use_mask\
-                                                            else None
+        mask = self.get_mask(self.seq_len, bidirectional=False) if\
+                                                self.use_mask else None
         self.register_buffer("mask", mask)
-        self.pos_encoding = PositionalEncoder(seq_len, emb_size)
+
+        self.pos_encoding = PositionalEncoder(self.seq_len,
+                                              self.emb_size)
+        # init_decs is a paradigm in which the decoded vectors all
+        # start from a learned initialization vector. multi_init is
+        # an additional argument that allows each decoding location
+        # in the sequence to use its own unique initialization
         if self.init_decs: 
             if self.prob_embs: vec_size = 2*self.emb_size
             else: vec_size = self.emb_size
-            self.inits = torch.randn(1,1,vec_size)
+            n_vecs = self.seq_len if self.multi_init else 1
+            self.inits = torch.randn(1,n_vecs,vec_size)
             divisor = float(np.sqrt(vec_size))
             self.inits = nn.Parameter(self.inits/divisor)
         self.dec_layers = nn.ModuleList([])
-        for _ in range(n_layers):
-            block = DecodingBlock(emb_size=emb_size,
-                                  attn_size=attn_size,
-                                  n_heads=n_heads,
-                                  act_fxn=act_fxn,
+        for _ in range(self.n_layers):
+            block = DecodingBlock(emb_size=self.emb_size,
+                                  attn_size=self.attn_size,
+                                  n_heads=self.n_heads,
+                                  act_fxn=self.act_fxn,
                                   prob_attn=self.prob_attn,
                                   prob_embs=self.prob_embs)
             self.dec_layers.append(block)
@@ -319,57 +347,221 @@ class Decoder(nn.Module):
         enc_mask: torch tensor (B,S)
             a mask to prevent some tokens from influencing the output
         """
-        if (not self.train and not self.init_decs) or self.gen_decs:
-            return self.gen_dec_fwd(x,encs, x_mask=x_mask,
-                                            enc_mask=enc_mask)
-        else:
-            if self.mask is not None and x.shape[1] != self.seq_len:
-                mask = self.get_mask(x.shape[1])
-            else:
-                mask = self.mask
-            if self.init_decs:
-                x = self.inits.repeat(len(x),x.shape[1],1)
-                x_mask = None
-            if self.prob_embs:
-                x = sample_probs(x)
-                og_encs = encs
-                encs = sample_probs(og_encs)
-            fx = self.pos_encoding(x)
-            for i,dec in enumerate(self.dec_layers):
-                fx = dec(fx, encs, mask=self.mask, x_mask=x_mask,
-                                                   enc_mask=enc_mask)
-                if self.prob_embs:
-                    fx = sample_probs(fx)
-                    encs = sample_probs(og_encs)
-            return fx
+        # Learned initialization paradigm
+        if self.init_decs:
+            x_len = self.seq_len if x is None else x.shape[1]
+            n_vecs = 1 if self.multi_init else x_len
+            x = self.inits.repeat(len(encs),n_vecs,1)
+            x_mask = None
 
-    def gen_dec_fwd(self, x, encs, x_mask=None, enc_mask=None):
+        if self.mask is not None and x.shape[1] != self.seq_len:
+            mask = self.get_mask(x.shape[1])
+        else:
+            mask = self.mask
+
+        if self.prob_embs:
+            x = sample_probs(x)
+            og_encs = encs
+            encs = sample_probs(og_encs)
+
+        fx = self.pos_encoding(x)
+        for i,dec in enumerate(self.dec_layers):
+            fx = dec(fx, encs, mask=self.mask, x_mask=x_mask,
+                                               enc_mask=enc_mask)
+            if self.prob_embs:
+                fx = sample_probs(fx)
+                encs = sample_probs(og_encs)
+        return fx
+
+    def get_mask(self, seq_len, bidirectional=False):
         """
-        x: torch tensor (B,S,E)
-            the decoding embeddings
-        encs: torch tensor (B,S,E)
-            the output from the encoding stack
+        Returns a mask to prevent the transformer from using forbidden
+        information >:)
+
+        The mask looks like the following with rows and columns of
+        length seq_len:
+
+        [0,-1e9,-1e9,-1e9]
+        [0,   0,-1e9,-1e9]
+        [0,   0,   0,-1e9]
+        [0,   0,   0,   0]
+
+        seq_len: int
+            the length of the sequence
+        bidirectional: bool
+            if true, then the decodings will see everything but the
+            current token.
+        """
+        if bidirectional:
+            mask = torch.zeros(seq_len,seq_len)
+            mask[range(seq_len-1),range(1,seq_len)] = -1e10
+        else:
+            mask = torch.FloatTensor(np.tri(seq_len,seq_len))
+            mask = mask.masked_fill(mask==0,-1e10)
+            mask[mask==1] = 0
+        return mask
+
+class GencodingBlock(nn.Module):
+    """
+    Extremely similar to a decoding block just without the initial
+    self-attention.
+    """
+    def __init__(self, emb_size, attn_size, n_heads=8,
+                                            act_fxn="ReLU",
+                                            prob_embs=False,
+                                            prob_attn=False):
+        """
+        emb_size: int
+            the size of the embeddings
+        attn_size: int
+            the size of the projected spaces in the attention layers
+        n_heads: int
+            the number of attention heads
+        act_fxn: str
+            the name of the activation function to be used with the
+            MLP
+        prob_embs: bool
+            if true, embedding vectors are treated as parameter
+            vectors for gaussian distributions
+        prob_attn: bool
+            if true, the queries and keys are projected into a
+            gaussian parameter vectors space and sampled
+        """
+        super().__init__()
+        self.emb_size = emb_size
+        self.attn_size = attn_size
+        self.prob_attn = prob_attn
+        self.prob_embs = prob_embs
+
+        self.norm1 = nn.LayerNorm((emb_size,))
+
+        self.multi_attn2 = MultiHeadAttention(emb_size=emb_size,
+                                              attn_size=attn_size,
+                                              n_heads=n_heads,
+                                              prob_attn=self.prob_attn)
+        self.norm2 = nn.LayerNorm((emb_size,))
+
+        self.fwd_net = nn.Sequential(nn.Linear(emb_size, emb_size),
+                                     globals()[act_fxn](),
+                                     nn.Linear(emb_size,emb_size))
+        self.norm3 = nn.LayerNorm((emb_size,))
+
+        if self.prob_embs:
+            self.proj = nn.Sequential(nn.Linear(emb_size,2*emb_size),
+                                      globals()[act_fxn](),
+                                      nn.Linear(2*emb_size,2*emb_size))
+
+    def forward(self, x, encs, mask=None, x_mask=None,
+                                          enc_mask=None):
+        """
+        x: torch FloatTensor (B,S,E)
+            batch by seq length by embedding size
+        encs: torch FloatTensor (B,S,E)
+            batch by seq length by embedding size of encodings
         x_mask: torch tensor (B,S)
             a mask to prevent some tokens from influencing the output
         enc_mask: torch tensor (B,S)
             a mask to prevent some tokens from influencing the output
         """
-        outputs = x[:,:1]
+        x = self.norm1(x)
+        fx = self.multi_attn2(q=x,k=encs,v=encs,mask=mask,
+                                                q_mask=x_mask,
+                                                k_mask=enc_mask)
+        fx = self.norm2(fx+x)
+        fx = self.fwd_net(fx)
+        fx = self.norm3(fx+x)
         if self.prob_embs:
-            outputs = sample_probs(outputs)
-            og_encs = encs
-            encs = sample_probs(og_encs)
-        for i in range(x.shape[1]-1):
-            fx = outputs
-            fx = self.pos_encoding(fx)
-            for dec in self.dec_layers:
-                fx = dec(fx, encs, mask=None, x_mask=x_mask,
-                                              enc_mask=enc_mask)
-            outputs = torch.cat([outputs,fx[:,-1:]],dim=1)
+            fx = self.proj(fx)
+        return fx
+
+class Gencoder(ECoderBase):
+    def __init__(self, *args, multi_init=False, **kwargs):
+        """
+        A decoder that uses learned vectors as decodeable outputs
+        seq_len: int
+            the length of the sequences to be analyzed
+        emb_size: int
+            the size of the embeddings
+        attn_size: int
+            the size of the projected spaces in the attention layers
+        n_layers: int
+            the number of encoding layers
+        n_heads: int
+            the number of attention heads
+        multi_init: bool
+            if true, the initialization vector has a unique value for
+            each slot in the generated sequence
+        prob_embs: bool
+            if true, embedding vectors are treated as parameter
+            vectors for gaussian distributions
+        prob_attn: bool
+            if true, the queries and keys are projected into a
+            gaussian parameter vectors space and sampled
+        """
+        super().__init__(*args, **kwargs)
+        self.multi_init = multi_init
+
+        if self.prob_embs: vec_size = 2*self.emb_size
+        else: vec_size = self.emb_size
+        if multi_init:
+            self.init_vec = torch.randn(1,self.seq_len,vec_size)
+        else:
+            self.init_vec = torch.randn(1,1,vec_size)
+        divisor = float(np.sqrt(vec_size))
+        self.init_vec = nn.Parameter(self.init_vec/divisor)
+        self.pos_encoding = PositionalEncoder(self.seq_len, 
+                                              self.emb_size)
+        self.dec_layers = nn.ModuleList([])
+        block = GencodingBlock(emb_size=self.emb_size,
+                              attn_size=self.attn_size,
+                              n_heads=self.n_heads,
+                              act_fxn=self.act_fxn,
+                              prob_embs=self.prob_embs,
+                              prob_attn=self.prob_attn)
+        self.dec_layers.append(block)
+        for _ in range(self.n_layers-1):
+            block = DecodingBlock(emb_size=self.emb_size,
+                                  attn_size=self.attn_size,
+                                  n_heads=self.n_heads,
+                                  act_fxn=self.act_fxn,
+                                  prob_embs=self.prob_embs,
+                                  prob_attn=self.prob_attn)
+            self.dec_layers.append(block)
+
+    def get_init_vec(self, batch_size):
+        """
+        batch_size: int
+            the size of the batch
+        """
+        if self.multi_init:
+            return self.init_vec.repeat(batch_size,1,1)
+        return self.init_vec.repeat(batch_size,self.seq_len,1)
+
+    def forward(self, x, y, x_mask=None, y_mask=None):
+        """
+        x: torch tensor (B,S,E)
+            the decoding embeddings
+        y: torch tensor (B,S,E)
+            the output from the encoding stack. if prob_embs is true,
+            y is sampled within the forward fxn
+        x_mask: torch FloatTensor (B,S)
+            a mask to prevent some tokens from influencing the output
+        y_mask: torch FloatTensor (B,S)
+            a mask to prevent some tokens from influencing the output
+        """
+        if x is None:
+            x = self.get_init_vec(len(y))
+        if self.prob_embs:
+            x = sample_probs(x)
+            og_y = y
+            y = sample_probs(og_y)
+        fx = self.pos_encoding(x)
+        for dec in self.dec_layers:
+            fx = dec(fx,y,x_mask=x_mask,enc_mask=y_mask)
             if self.prob_embs:
-                outputs = sample_probs(outputs)
-                encs = sample_probs(og_encs)
-        return outputs
+                fx = sample_probs(fx)
+                y = sample_probs(og_y)
+        return fx
 
     def get_mask(self, seq_len, bidirectional=False):
         """
@@ -391,29 +583,342 @@ class Decoder(nn.Module):
             mask[mask==1] = 0
         return mask
 
+class AttnBlock(nn.Module):
+    """
+    This is a module to apply attention over a sequence of vectors
+    but only for a single query vector. Saves computational power
+    for single state vector systems.
+    """
+    def __init__(self, emb_size, attn_size, n_heads=8,
+                                            act_fxn="ReLU",
+                                            prob_embs=False,
+                                            prob_attn=False):
+        """
+        emb_size: int
+            the size of the embeddings
+        attn_size: int
+            the size of the projected spaces in the attention layers
+        n_heads: int
+            the number of attention heads
+        act_fxn: str
+            the name of the activation function to be used with the
+            MLP
+        prob_embs: bool
+            if true, embedding vectors are treated as parameter
+            vectors for gaussian distributions
+        prob_attn: bool
+            if true, the queries and keys are projected into a
+            gaussian parameter vectors space and sampled
+        """
+        super().__init__()
+        self.emb_size = emb_size
+        self.attn_size = attn_size
+        self.prob_embs = prob_embs
+        self.prob_attn = prob_attn
+
+        self.norm1 = nn.LayerNorm((emb_size,))
+        self.multi_attn1 = MultiHeadAttention(emb_size=emb_size,
+                                              attn_size=attn_size,
+                                              n_heads=n_heads,
+                                              prob_attn=self.prob_attn)
+        self.norm2 = nn.LayerNorm((emb_size,))
+        self.fwd_net = nn.Sequential(nn.Linear(emb_size, emb_size),
+                                     globals()[act_fxn](),
+                                     nn.Linear(emb_size,emb_size))
+        self.norm3 = nn.LayerNorm((emb_size,))
+
+        if self.prob_embs:
+            self.proj = nn.Sequential(nn.Linear(emb_size,2*emb_size),
+                                      globals()[act_fxn](),
+                                      nn.Linear(2*emb_size,2*emb_size))
+
+    def forward(self, x, encs, mask=None, x_mask=None,
+                                          enc_mask=None):
+        """
+        x: torch FloatTensor (B,S,E)
+            batch by seq length by embedding size
+        encs: torch FloatTensor (B,S,E)
+            batch by seq length by embedding size of encodings
+        mask: torch float tensor (B,S,S) (optional)
+            if a mask is argued, it is applied to the attention values
+            to prevent information contamination
+        x_mask: torch FloatTensor (B,S)
+            a mask to prevent some tokens from influencing the output
+        enc_mask: torch FloatTensor (B,S)
+            a mask to prevent some tokens from influencing the output
+            [0,-1e9,-1e9,-1e9]
+            [0,   0,-1e9,-1e9]
+            [0,   0,   0,-1e9]
+            [0,   0,   0,   0]
+        """
+
+        x = self.norm1(x)
+        fx = self.multi_attn1(q=x,k=encs,v=encs, mask=None,
+                                                  q_mask=x_mask,
+                                                  k_mask=enc_mask)
+        fx = self.norm2(fx+x)
+        fx = self.fwd_net(fx)
+        fx = self.norm3(fx+x)
+        if self.prob_embs:
+            fx = self.proj(fx)
+        return fx
+
+class Attncoder(ECoderBase):
+    """
+    Very similar to the Decoder and Gencoder modules. This one is
+    built for cases in which you do not want to apply self attention
+    over the elements of interest but only attention over some other
+    sequential vector set.
+    """
+    def __init__(self, *args, init_decs=False, multi_init=False,
+                                               **kwargs):
+        """
+        A decoder that uses learned vectors as decodeable outputs
+        seq_len: int
+            the length of the sequences to be analyzed
+        emb_size: int
+            the size of the embeddings
+        attn_size: int
+            the size of the projected spaces in the attention layers
+        n_layers: int
+            the number of encoding layers
+        n_heads: int
+            the number of attention heads
+        init_decs: bool
+            determines if you would like to have a learned initialization
+            vector for the query vector.
+        multi_init: bool
+            if true, the initialization vector has a unique value for
+            each slot in the generated sequence
+        prob_embs: bool
+            if true, embedding vectors are treated as parameter
+            vectors for gaussian distributions
+        prob_attn: bool
+            if true, the queries and keys are projected into a
+            gaussian parameter vectors space and sampled
+        """
+        super().__init__(*args, **kwargs)
+        self.init_decs = init_decs
+        self.multi_init = multi_init
+
+        if self.prob_embs: vec_size = 2*self.emb_size
+        else: vec_size = self.emb_size
+        if self.init_decs:
+            if multi_init:
+                self.init_vec = torch.randn(1,self.seq_len,vec_size)
+            else:
+                self.init_vec = torch.randn(1,1,vec_size)
+            divisor = float(np.sqrt(vec_size))
+            self.init_vec = nn.Parameter(self.init_vec/divisor)
+
+        self.attn_layers = nn.ModuleList([])
+        for _ in range(self.n_layers):
+            block = AttnBlock(emb_size=self.emb_size,
+                                  attn_size=self.attn_size,
+                                  n_heads=self.n_heads,
+                                  act_fxn=self.act_fxn,
+                                  prob_embs=self.prob_embs,
+                                  prob_attn=self.prob_attn)
+            self.attn_layers.append(block)
+
+    def get_init_vec(self, batch_size):
+        """
+        batch_size: int
+            the size of the batch
+        """
+        if self.multi_init:
+            return self.init_vec.repeat(batch_size,1,1)
+        return self.init_vec.repeat(batch_size,self.seq_len,1)
+
+    def forward(self, x, y, x_mask=None, y_mask=None):
+        """
+        x: torch tensor (B,S,E)
+            the decoding embeddings
+        y: torch tensor (B,S,E)
+            the output from the encoding stack. if prob_embs is true,
+            y is sampled within the forward fxn
+        x_mask: torch FloatTensor (B,S)
+            a mask to prevent some tokens from influencing the output
+        y_mask: torch FloatTensor (B,S)
+            a mask to prevent some tokens from influencing the output
+        """
+
+        # Learned initialization paradigm
+        if x is None or self.init_decs:
+            x = self.get_init_vec(len(y))
+        # Stochastic paradigm
+        if self.prob_embs:
+            x = sample_probs(x)
+            og_y = y
+            y = sample_probs(og_y)
+        # Multiple layers of attention over the sequential vectors.
+        # No self attention
+        for block in self.attn_layers:
+            x = block(x,y,x_mask=x_mask,enc_mask=y_mask)
+            if self.prob_embs:
+                x = sample_probs(x)
+                y = sample_probs(og_y)
+        return x
+
+    def get_mask(self, seq_len, bidirectional=False):
+        """
+        Returns a diagonal mask to prevent the transformer from looking
+        at the word it is trying to predict.
+
+        seq_len: int
+            the length of the sequence
+        bidirectional: bool
+            if true, then the decodings will see everything but the
+            current token.
+        """
+        if bidirectional:
+            mask = torch.zeros(seq_len,seq_len)
+            mask[range(seq_len-1),range(1,seq_len)] = -1e10
+        else:
+            mask = torch.FloatTensor(np.tri(seq_len,seq_len))
+            mask = mask.masked_fill(mask==0,-1e10)
+            mask[mask==1] = 0
+        return mask
+
+class AppendEncoder(ECoderBase):
+    """
+    This is an encoder that concatenates initialized vectors to the
+    sequence to allow for encoding and decoding at the same time. It
+    is effectively a Decoder only transformer but some fixed number
+    of vectors are appended to the initial inputs for each run-through.
+    """
+    def __init__(self, *args, state_size=3, **kwargs):
+        """
+        See ECoderBase for argument details
+
+        seq_len: int
+            the length of the sequences to be analyzed
+        emb_size: int
+            the size of the embeddings
+        attn_size: int
+            the size of the projected spaces in the attention layers
+        n_layers: int
+            the number of encoding layers
+        n_heads: int
+            the number of attention heads
+        use_mask: bool
+            if true, creates a mask to prevent the model from peaking
+            ahead
+        act_fxn: str
+            the name of the activation function to be used with the
+            MLP
+        prob_embs: bool
+            if true, embedding vectors are treated as parameter
+            vectors for gaussian distributions
+        prob_attn: bool
+            if true, the queries and keys are projected into a
+            gaussian parameter vectors space and sampled
+        state_size: int
+            the number of new vectors to append to the inputs for
+            encoding.
+        multi_init: bool
+            if true, the initialization vector has a unique value for
+            each slot in the generated sequence
+        """
+        super().__init__(*args, **kwargs)
+        self.state_size = state_size
+        self.multi_init = multi_init
+        if self.use_mask:
+            print("AppendEncoder is using a mask!!")
+
+        if self.prob_embs: vec_size = 2*self.emb_size
+        else: vec_size = self.emb_size
+        if multi_init:
+            self.init_vec = torch.randn(1,self.state_size,vec_size)
+        else:
+            self.init_vec = torch.randn(1,1,vec_size)
+        divisor = float(np.sqrt(vec_size))
+        self.init_vec = nn.Parameter(self.init_vec/divisor)
+
+        self.n_encs = self.seq_len+self.state_size
+        self.pos_encoding = PositionalEncoder(self.n_encs,self.emb_size)
+        mask = self.get_mask(self.seq_len) if self.use_mask else None
+        self.register_buffer("mask",mask)
+        self.enc_layers = nn.ModuleList([])
+        for _ in range(self.n_layers):
+            block = EncodingBlock(emb_size=self.emb_size,
+                                  attn_size=self.attn_size,
+                                  n_heads=self.n_heads,
+                                  act_fxn=self.act_fxn,
+                                  prob_embs=self.prob_embs,
+                                  prob_attn=self.prob_attn)
+            self.enc_layers.append(block)
+
+    def forward(self,x,x_mask=None):
+        """
+        x: torch FloatTensor (B,S,E)
+            batch by seq length by embedding size
+        x_mask: torch tensor (B,S)
+            a mask to prevent some tokens from influencing the output
+        """
+        if x.shape[1] != self.seq_len:
+            mask = self.get_mask(x.shape[1], self.state_size)
+            mask = mask.to(DEVICE_DICT[x.get_device()])
+            self.register_buffer("mask",mask)
+        else:
+            mask = self.mask
+
+        # TODO: figure out your fucking life and test this module
+        reps = 1 if self.multi_init else self.state_size
+        inits = self.inits.repeat(len(x),reps,1)
+        x = torch.cat([x,inits],dim=1)
+        if self.prob_embs:
+            x = sample_probs(x)
+        fx = self.pos_encoding(x)
+        for i,enc in enumerate(self.enc_layers):
+            fx = enc(fx,mask=mask,x_mask=x_mask)
+            if self.prob_embs and i < len(self.enc_layers)-1:
+                fx = sample_probs(fx)
+        return fx
+
+    def get_mask(self, seq_len, state_size, bidirectional=False):
+        """
+        Returns a mask that blocks the future vectors in the sequence
+        but does not block the state vectors.
+        """
+        mask = np.tri(seq_len+state_size,seq_len+state_size)
+        mask[:,seq_len:] = 1
+        mask = torch.FloatTensor(mask)
+        mask = mask.masked_fill(mask==0,-1e10)
+        mask[mask==1] = 0
+        return mask
 
 class TransformerBase(nn.Module):
+    """
+    This is a class to hold all of the key parameters argued to the
+    transformer. This makes it easier to create variations of the
+    transformer architecture.
+    """
     def __init__(self, seq_len=None, n_vocab=None,
                                      emb_size=512,
                                      enc_slen=None,
                                      dec_slen=None,
                                      attn_size=64,
                                      n_heads=8,
-                                     enc_layers=6,
-                                     dec_layers=6,
+                                     act_fxn="ReLU",
+                                     enc_layers=3,
+                                     dec_layers=3,
                                      enc_mask=False,
                                      class_h_size=4000,
                                      class_bnorm=True,
                                      class_drop_p=0,
-                                     act_fxn="ReLU",
                                      enc_drop_p=0,
                                      dec_drop_p=0,
                                      ordered_preds=False,
-                                     gen_decs=False,
                                      init_decs=False,
                                      idx_inputs=True,
+                                     idx_outputs=True,
                                      prob_embs=False,
                                      prob_attn=False,
+                                     mask_idx=0,
+                                     start_idx=None,
+                                     stop_idx=None,
+                                     multi_init=False,
                                      **kwargs):
         """
         seq_len: int or None
@@ -431,6 +936,8 @@ class TransformerBase(nn.Module):
             the size of the projected spaces in the attention layers
         n_heads: int
             the number of attention heads
+        act_fxn: str
+            the activation function to be used in the MLPs
         enc_layers: int
             the number of encoding layers
         dec_layers: int
@@ -443,8 +950,6 @@ class TransformerBase(nn.Module):
             if true, the classifier uses batchnorm
         class_drop_p: float
             the dropout probability for the classifier
-        act_fxn: str
-            the activation function to be used in the MLPs
         enc_drop_ps: float or list of floats
             the dropout probability for each encoding layer
         dec_drop_ps: float or list of floats
@@ -453,11 +958,6 @@ class TransformerBase(nn.Module):
             if true, the decoder will mask the predicted sequence so
             that the attention modules will not see the tokens ahead
             located further along in the sequence.
-        gen_decs: bool
-            if true, decodings are generated individually and used
-            as the inputs for later decodings. (stands for generate
-            decodings). This ensures earlier attention values are
-            completely unaffected by later inputs.
         init_decs: bool
             if true, an initialization decoding vector is learned as
             the initial input to the decoder.
@@ -465,6 +965,11 @@ class TransformerBase(nn.Module):
             if true, the inputs are integer (long) indexes that require
             an embedding layer. Otherwise it is assumed that the inputs
             are feature vectors that do not require an embedding layer
+        idx_outputs: bool
+            if true, the output sequence (y) is integer (long) indexes
+            that require an embedding layer. Otherwise it is assumed
+            that the outputs are feature vectors that do not require
+            an embedding layer
         prob_embs: bool
             if true, all embedding vectors are treated as parameter
             vectors for gaussian distributions before being fed into
@@ -473,6 +978,15 @@ class TransformerBase(nn.Module):
             if true, the queries and keys are projected into a mu and
             sigma vector and sampled from a gaussian distribution
             before the attn mechanism
+        mask_idx: int
+            the numeric index of the mask token
+        start_idx: int
+            the numeric index of the start token
+        stop_idx: int
+            the numeric index of the stop token
+        multi_init: bool
+            if true, the initialization vector has a unique value for
+            each slot in the generated sequence
         """
         super().__init__()
 
@@ -493,11 +1007,15 @@ class TransformerBase(nn.Module):
         self.enc_drop_p = enc_drop_p
         self.dec_drop_p = dec_drop_p
         self.ordered_preds = ordered_preds
-        self.gen_decs = gen_decs
         self.init_decs = init_decs
         self.idx_inputs = idx_inputs
+        self.idx_outputs = idx_outputs
         self.prob_embs = prob_embs
         self.prob_attn = prob_attn
+        self.mask_idx = mask_idx
+        self.start_idx = start_idx
+        self.stop_idx = stop_idx
+        self.multi_init = multi_init
     
     @property
     def is_cuda(self):
@@ -512,11 +1030,12 @@ class Transformer(TransformerBase):
         See TransformerBase for arguments
         """
         super().__init__(*args, **kwargs)
-        self.transformer_type = SEQ2SEQ
-
         print("enc_slen:", self.enc_slen)
         print("dec_slen:", self.dec_slen)
-        if self.prob_embs: 
+
+        if not self.idx_inputs and not self.idx_outputs:
+            self.embeddings = None
+        elif self.prob_embs: 
             self.embeddings =nn.Embedding(self.n_vocab,2*self.emb_size)
         else:
             self.embeddings = nn.Embedding(self.n_vocab, self.emb_size)
@@ -530,15 +1049,17 @@ class Transformer(TransformerBase):
                                             prob_attn=self.prob_attn,
                                             prob_embs=self.prob_embs)
 
-        use_mask = not self.init_decs and self.ordered_preds
+        self.use_mask = not self.init_decs and self.ordered_preds
+        if self.init_decs:
+            print("init_decs prevented use of mask in decoder")
         self.decoder = Decoder(self.dec_slen,self.emb_size,
                                             self.attn_size,
                                             self.dec_layers,
                                             n_heads=self.n_heads,
                                             act_fxn=self.act_fxn,
-                                            use_mask=use_mask,
+                                            use_mask=self.use_mask,
                                             init_decs=self.init_decs,
-                                            gen_decs=self.gen_decs,
+                                            multi_init=self.multi_init,
                                             prob_attn=self.prob_attn,
                                             prob_embs=self.prob_embs)
 
@@ -551,29 +1072,221 @@ class Transformer(TransformerBase):
         self.enc_dropout = nn.Dropout(self.enc_drop_p)
         self.dec_dropout = nn.Dropout(self.dec_drop_p)
 
-    def forward(self, x, y):
+    def forward(self, x, y, x_mask=None, y_mask=None, ret_latns=False):
         """
         x: float tensor (B,S)
         y: float tensor (B,S)
+        x_mask: float tensor (B,S)
+            defaults to indexes equal to 0 if None is argued
+        ret_latns: bool
+            if true, the latent decodings are returned in addition to
+            the classification predictions
         """
-        y_mask = (y==0).masked_fill(y==0,1e-10)
-        self.embeddings.weight.data[0,:] = 0 # Mask index
-        bitmask = (x==0)
+        if self.embeddings is not None:
+            self.embeddings.weight.data[0,:] = 0 # Mask index
         if self.idx_inputs is not None and self.idx_inputs:
             embs = self.embeddings(x)
-            x_mask = bitmask.masked_fill(bitmask,1e-10)
+            if x_mask is None:
+                bitmask = (x==0)
+                x_mask = bitmask.float().masked_fill(bitmask,-1e10)
         else:
             embs = x
-            x_mask=None
         encs = self.encoder(embs,x_mask=x_mask)
         encs = self.enc_dropout(encs)
-        dembs = self.embeddings(y)
+        # Teacher force
+        if self.training or not self.use_mask:
+            return self.teacher_force_fwd(encs,y,x_mask,y_mask,
+                                                        ret_latns)
+        else:
+            latns = []
+            pred_distr = []
+            outputs = y[:,:1]
+            idx = self.idx_outputs is not None and self.idx_outputs
+            if idx and y_mask is None:
+                y_mask = (y==0).masked_fill(y==0,-1e10)
+            for i in range(y.shape[1]):
+                if idx:
+                    dembs = self.embeddings(outputs)
+                    temp_mask = y_mask[:,:outputs.shape[1]]
+                else:
+                    dembs = outputs
+                    if y_mask is not None:
+                        temp_mask = y_mask[:,:outputs.shape[1]]
+                    else:
+                        temp_mask = y_mask
+                decs = self.decoder(dembs, encs, x_mask=temp_mask,
+                                                 enc_mask=x_mask)
+                decs = decs[:,-1:] # only take the latest element
+                decs = self.dec_dropout(decs)
+                decs = decs.reshape(-1,decs.shape[-1])
+                preds = self.classifier(decs)
+                preds = preds.reshape(len(y),1,preds.shape[-1])
+                pred_distr.append(preds)
+                if idx: argmaxs = torch.argmax(preds,dim=-1)
+                else: argmaxs = decs
+                outputs = torch.cat([outputs,argmaxs],dim=1)
+            preds = torch.cat(pred_distr,dim=1)
+            if ret_latns:
+                latns = decs.reshape(len(y),y.shape[1],decs.shape[-1])
+                return preds,latns
+            return preds
+
+
+    def teacher_force_fwd(self, encs, y, x_mask, y_mask, ret_latns):
+        """
+        Use this only as an offshoot of the forward function.
+        Uses teacher forcing to train the model.
+        """
+        if self.idx_outputs is not None and self.idx_outputs:
+            dembs = self.embeddings(y)
+            if y_mask is None:
+                y_mask = (y==0).masked_fill(y==0,-1e10)
+        else:
+            dembs = y
         decs = self.decoder(dembs, encs, x_mask=y_mask,
                                          enc_mask=x_mask)
         decs = self.dec_dropout(decs)
         decs = decs.reshape(-1,decs.shape[-1])
         preds = self.classifier(decs)
-        return preds.reshape(len(y),y.shape[1],preds.shape[-1])
+        preds = preds.reshape(len(y),y.shape[1],preds.shape[-1])
+        if ret_latns:
+            return preds,decs.reshape(len(y),y.shape[1],decs.shape[-1])
+        return preds
+
+
+class Transformer(TransformerBase):
+    def __init__(self, *args, **kwargs):
+        """
+        See TransformerBase for arguments
+        """
+        super().__init__(*args, **kwargs)
+        print("enc_slen:", self.enc_slen)
+        print("dec_slen:", self.dec_slen)
+        self.transformer_type = "seq2seq"
+
+        if not self.idx_inputs and not self.idx_outputs:
+            self.embeddings = None
+        elif self.prob_embs: 
+            self.embeddings =nn.Embedding(self.n_vocab,2*self.emb_size)
+        else:
+            self.embeddings = nn.Embedding(self.n_vocab, self.emb_size)
+
+        self.encoder = Encoder(self.enc_slen,emb_size=self.emb_size,
+                                            attn_size=self.attn_size,
+                                            n_layers=self.enc_layers,
+                                            n_heads=self.n_heads,
+                                            use_mask=self.enc_mask,
+                                            act_fxn=self.act_fxn,
+                                            prob_attn=self.prob_attn,
+                                            prob_embs=self.prob_embs)
+
+        self.use_mask = not self.init_decs and self.ordered_preds
+        if self.init_decs:
+            print("init_decs prevented use of mask in decoder")
+        self.decoder = Decoder(self.dec_slen,self.emb_size,
+                                            self.attn_size,
+                                            self.dec_layers,
+                                            n_heads=self.n_heads,
+                                            act_fxn=self.act_fxn,
+                                            use_mask=self.use_mask,
+                                            init_decs=self.init_decs,
+                                            prob_attn=self.prob_attn,
+                                            prob_embs=self.prob_embs)
+
+        self.classifier = Classifier(self.emb_size,
+                                     self.n_vocab,
+                                     h_size=self.class_h_size,
+                                     bnorm=self.class_bnorm,
+                                     drop_p=self.class_drop_p,
+                                     act_fxn=self.act_fxn)
+        self.enc_dropout = nn.Dropout(self.enc_drop_p)
+        self.dec_dropout = nn.Dropout(self.dec_drop_p)
+
+    def forward(self, x, y, x_mask=None, y_mask=None, ret_latns=False):
+        """
+        x: long tensor (B,S) or float tensor (B,S,E)
+            x can take on integer values or float values depending on
+            the self.idx_inputs argument
+        y: float tensor (B,S1)
+        x_mask: float tensor (S,S)
+            defaults to indexes equal to 0 if None is argued
+        y_mask: float tensor (S1,S1)
+            defaults to y indexes equal to 0 if None is argued
+        ret_latns: bool
+            if true, the latent decodings are returned in addition to
+            the classification predictions
+        """
+        if self.embeddings is not None:
+            self.embeddings.weight.data[0,:] = 0 # Mask index
+        if self.idx_inputs is not None and self.idx_inputs:
+            embs = self.embeddings(x)
+            if x_mask is None:
+                bitmask = (x==0)
+                x_mask = bitmask.float().masked_fill(bitmask,-1e10)
+        else:
+            embs = x
+        encs = self.encoder(embs,x_mask=x_mask)
+        encs = self.enc_dropout(encs)
+        # Teacher force
+        if self.training or not self.use_mask:
+            return self.teacher_force_fwd(encs,y,x_mask,y_mask,
+                                                        ret_latns)
+        else:
+            latns = []
+            pred_distr = []
+            outputs = y[:,:1]
+            idx = self.idx_outputs is not None and self.idx_outputs
+            if idx and y_mask is None:
+                y_mask = (y==0).masked_fill(y==0,-1e10)
+            for i in range(y.shape[1]):
+                if idx:
+                    dembs = self.embeddings(outputs)
+                    temp_mask = y_mask[:,:outputs.shape[1]]
+                else:
+                    dembs = outputs
+                    if y_mask is not None:
+                        temp_mask = y_mask[:,:outputs.shape[1]]
+                    else:
+                        temp_mask = y_mask
+                decs = self.decoder(dembs, encs, x_mask=temp_mask,
+                                                 enc_mask=x_mask)
+                decs = decs[:,-1:] # only take the latest element
+                decs = self.dec_dropout(decs)
+                decs = decs.reshape(-1,decs.shape[-1])
+                preds = self.classifier(decs)
+                preds = preds.reshape(len(y),1,preds.shape[-1])
+                pred_distr.append(preds)
+                if idx: argmaxs = torch.argmax(preds,dim=-1)
+                else: argmaxs = decs
+                outputs = torch.cat([outputs,argmaxs],dim=1)
+            preds = torch.cat(pred_distr,dim=1)
+            if ret_latns:
+                latns = decs.reshape(len(y),y.shape[1],decs.shape[-1])
+                return preds,latns
+            return preds
+
+
+    def teacher_force_fwd(self, encs, y, x_mask, y_mask, ret_latns):
+        """
+        Use this only as an offshoot of the forward function.
+        Uses teacher forcing to train the model.
+        """
+        if self.idx_outputs is not None and self.idx_outputs:
+            dembs = self.embeddings(y)
+            if y_mask is None:
+                y_mask = (y==0).masked_fill(y==0,-1e10)
+        else:
+            dembs = y
+        decs = self.decoder(dembs, encs, x_mask=y_mask,
+                                         enc_mask=x_mask)
+        decs = self.dec_dropout(decs)
+        decs = decs.reshape(-1,decs.shape[-1])
+        preds = self.classifier(decs)
+        preds = preds.reshape(len(y),y.shape[1],preds.shape[-1])
+        if ret_latns:
+            return preds,decs.reshape(len(y),y.shape[1],decs.shape[-1])
+        return preds
+
 
 class Classifier(nn.Module):
     def __init__(self, emb_size, n_vocab, h_size, bnorm=True,

@@ -1,23 +1,20 @@
 from setuptools import setup, find_packages
 from setuptools.command.install import install
 
-setup(name='crab',
+setup(name='transformer',
       packages=find_packages(),
       version="0.1.0",
-      description='A visual attention system',
+      description='A reproducibility project of vaswani et al 2017',
       author='Satchel Grant',
       author_email='grantsrb@stanford.edu',
-      url='https://github.com/grantsrb/voduct.git',
+      url='https://github.com/grantsrb/transformer.git',
       install_requires= ["numpy",
                          "torch",
                          "tqdm",
                          "psutil"],
-      py_modules=['crab'],
+      py_modules=['transformer'],
       long_description='''
-          This is a package to create and use a combination method of
-          transformers with CNNs leverage attention for improved
-          compositional feature finding and counting of objects in
-          static images.
+            A reproducibility project of vaswani et al 2017
           ''',
       classifiers=[
           'Intended Audience :: Science/Research',

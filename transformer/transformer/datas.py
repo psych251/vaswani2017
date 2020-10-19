@@ -9,7 +9,7 @@ import pickle
 import tokenizer as tk
 import random
 import skimage.io
-from crab.utils import get_max_key
+from transformer.utils import get_max_key
 
 def rand_sample(arr, n_samples=1):
     """

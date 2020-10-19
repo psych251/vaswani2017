@@ -11,17 +11,13 @@ import math
 from queue import Queue
 from collections import deque
 import psutil
-import gc
-import resource
 import json
-import crab.datas as datas
-import crab.models as models
-import crab.save_io as io
-
-def try_key(d, key, val):
-    if key in d:
-        return d[key]
-    return val
+import transformer.datas as datas
+import transformer.custom_modules as custmods
+import transformer.models as models
+import ml_utils.save_io as io
+from ml_utils.training import get_exp_num, record_session, get_save_folder
+from ml_utils.utils import try_key
 
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda:0")
@@ -42,7 +38,7 @@ def train(hyps, verbose=True):
     torch.manual_seed(hyps['seed'])
     np.random.seed(hyps['seed'])
     model_class = hyps['model_class']
-    hyps['model_type'] = models.TRANSFORMER_TYPE[model_class]
+    hyps['model_type'] = custmods.TRANSFORMER_TYPE[model_class]
     hyps['n_loss_loops'] = try_key(hyps,'n_loss_loops',1)
     if not hyps['init_decs'] and not hyps['gen_decs'] and\
                                 not hyps['ordered_preds']:
@@ -63,7 +59,10 @@ def train(hyps, verbose=True):
     hyps['enc_slen'] = train_data.X.shape[-1]
     hyps['dec_slen'] = train_data.Y.shape[-1] + 1
     tup = train_data[0]
-    if len(tup) >= 3: hyps["img_shape"] = tup[-1].shape
+    if len(tup) == 3: hyps["img_shape"] = tup[-1].shape
+    elif len(tup) > 3: 
+        hyps["img_shape"] = tup[0].shape
+        hyps['count_len'] = tup[-1].shape[-1] + 1
     else: hyps['img_shape'] = tup[0].shape
     train_loader = torch.utils.data.DataLoader(train_data,
                                     batch_size=hyps['batch_size'],
@@ -72,6 +71,10 @@ def train(hyps, verbose=True):
     val_loader = torch.utils.data.DataLoader(val_data,
                                     batch_size=hyps['batch_size'])
     hyps['n_vocab'] = len(train_data.word2idx.keys())
+    tokz = train_data.tokenizer
+    hyps['mask_idx']  = train_data.word2idx[tokz.MASK]
+    hyps['start_idx'] = train_data.word2idx[tokz.START]
+    hyps['stop_idx']  = train_data.word2idx[tokz.STOP]
 
     if verbose:
         print("Making model")
@@ -82,6 +85,13 @@ def train(hyps, verbose=True):
     model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=hyps['lr'],
                                            weight_decay=hyps['l2'])
+    init_checkpt = try_key(hyps,"init_checkpt", None)
+    if init_checkpt is not None and init_checkpt != "":
+        if verbose:
+            print("Loading state dicts from", init_checkpt)
+        checkpt = io.load_checkpoint(init_checkpt)
+        model.load_state_dict(checkpt["state_dict"])
+        optimizer.load_state_dict(checkpt["optim_dict"])
     lossfxn = nn.CrossEntropyLoss()
     scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5,
                                                     patience=6,
@@ -89,8 +99,8 @@ def train(hyps, verbose=True):
 
     if verbose:
         print("Beginning training for {}".format(hyps['save_folder']))
-        print("train shape:", train_data.X.shape)
-        print("val shape:", val_data.X.shape)
+        print("train shape:", (len(train_data),*train_data.X.shape[1:]))
+        print("val shape:", (len(val_data),*val_data.X.shape[1:]))
         print("img shape:", hyps['img_shape'])
 
     record_session(hyps,model)
@@ -102,6 +112,7 @@ def train(hyps, verbose=True):
     epoch = -1
     alpha = hyps['loss_alpha']
     mask_idx = train_data.word2idx["<MASK>"]
+    null_loc = train_data.null_loc
     print()
     while epoch < hyps['n_epochs']:
         epoch += 1
@@ -110,6 +121,10 @@ def train(hyps, verbose=True):
         avg_loss = 0
         avg_acc = 0
         avg_indy_acc = 0
+        avg_c_loss = 0
+        avg_c_acc = 0
+        avg_c_indy_acc = 0
+        avg_z_loss = 0
         mask_avg_loss = 0
         mask_avg_acc = 0
         model.train()
@@ -132,7 +147,16 @@ def train(hyps, verbose=True):
                 z = tup[-1].to(DEVICE)
             elif len(tup) == 4: 
                 z,c = tup[-2].to(DEVICE), tup[-1].to(DEVICE)
+                c_targs = c[:,1:]
+                c_og_shape = c_targs.shape
+                c = c[:,:-1]
+                z_targs = z[:,1:]
+                z_og_shape = z_targs.shape
+                z = z[:,:-1]
             preds = model(x.to(DEVICE), y.to(DEVICE), z, c)
+            c_preds,z_preds = None, None
+            if isinstance(preds,tuple):
+                preds,c_preds,z_preds = preds
 
             if epoch % 3 == 0 and b == 0:
                 whr = torch.where(y[0]==mask_idx)[0]
@@ -140,8 +164,29 @@ def train(hyps, verbose=True):
                 print("y:",[idx2word[a.item()] for a in y[0,:endx]])
                 print("t:",[idx2word[a.item()] for a in targs[0,:endx]])
                 ms = torch.argmax(preds,dim=-1)
-                print("p:", [idx2word[a.item()] for a in ms[0,:endx-1]])
+                print("p:", [idx2word[a.item()] for a in ms[0,:endx]])
                 del ms
+                if c_preds is not None:
+                    mask = c_targs[0]!=mask_idx
+                    l = [idx2word[a.item()] for a in c_targs[0][mask]]
+                    print("ct:",l)
+                    ms = torch.argmax(c_preds,dim=-1)
+                    l = [idx2word[a.item()] for a in ms[0][mask]]
+                    print("cp:", l)
+                    del ms
+                if z_preds is not None:
+                    s = "{:.3f} "*10
+                    s = s.format(*z[0][:,0].tolist()[:10])
+                    print("ztx:", s)
+                    s = "{:.3f} "*10
+                    s = s.format(*z_preds[0][:,0].tolist()[:10])
+                    print("zpx:", s)
+                    s = "{:.3f} "*10
+                    s = s.format(*z[0][:,1].tolist()[:10])
+                    print("zty:", s)
+                    s = "{:.3f} "*10
+                    s = s.format(*z_preds[0][:,1].tolist()[:10])
+                    print("zpy:", s)
 
             if hyps['masking_task']:
                 print("masking!")
@@ -165,29 +210,57 @@ def train(hyps, verbose=True):
                 mask_avg_acc  += mask_acc.item()
                 mask_avg_loss += mask_loss.item()
 
-            # Tot loss and acc
+            # Tot loss
             preds = preds.reshape(-1,preds.shape[-1])
             targs = targs.reshape(-1).to(DEVICE)
-            loss = lossfxn(preds,targs)
-            preds = torch.argmax(preds,dim=-1).reshape(og_shape)
-            targs = targs.reshape(og_shape)
-            sl = og_shape[-1]
-            eq = (preds==targs).float()
-            acc = (eq.sum(-1)==sl).float().mean()
-            indy_acc = eq.mean()
-            avg_acc += acc.item()
-            avg_indy_acc += indy_acc.item()
-            avg_loss += loss.item()
+            bitmask = targs!=mask_idx
+            loss = lossfxn(preds[bitmask],targs[bitmask])
+            if c_preds is not None:
+                c_preds = c_preds.reshape(-1,c_preds.shape[-1])
+                c_targs = c_targs.reshape(-1)
+                c_bitmask = c_targs!=mask_idx
+                c_loss = lossfxn(c_preds[c_bitmask],c_targs[c_bitmask])
+            else: c_loss = torch.zeros(1).to(DEVICE)
+            if z_preds is not None:
+                z_targs = z_targs.to(DEVICE)
+                z_bitmask = z_targs > null_loc
+                z_loss = F.mse_loss(z_preds[z_bitmask],
+                                    z_targs[z_bitmask])
+                avg_z_loss += z_loss.item()
+            else: z_loss = torch.zeros(1).to(DEVICE)
 
             if hyps['masking_task']:
-                tot_loss = (alpha)*loss + (1-alpha)*mask_loss
+                tot_loss = (alpha)*loss + (1-alpha)*mask_loss + c_loss
             else:
-                tot_loss = loss
+                tot_loss = loss + c_loss + z_loss
             tot_loss = tot_loss/hyps['n_loss_loops']
             tot_loss.backward()
             if b % hyps['n_loss_loops'] == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+
+            # Acc
+            preds = torch.argmax(preds,dim=-1)
+            sl = og_shape[-1]
+            eq = (preds==targs).float()
+            indy_acc = eq[bitmask].mean()
+            eq[~bitmask] = 1
+            eq = eq.reshape(og_shape)
+            acc = (eq.sum(-1)==sl).float().mean()
+            avg_acc += acc.item()
+            avg_indy_acc += indy_acc.item()
+            avg_loss += loss.item()
+            if c_preds is not None:
+                c_preds=torch.argmax(c_preds,dim=-1)
+                sl = c_og_shape[-1]
+                eq = (c_preds==c_targs).float()
+                c_indy_acc = eq.reshape(-1)[c_bitmask].mean()
+                eq[~c_bitmask] = 1
+                eq = eq.reshape(c_og_shape)
+                c_acc = (eq.sum(-1)==sl).float().mean()
+                avg_c_acc += c_acc.item()
+                avg_c_indy_acc += c_indy_acc.item()
+                avg_c_loss += c_loss.item()
 
             if hyps["masking_task"]:
                 s = "Mask Loss:{:.5f} | Acc:{:.5f} | {:.0f}%"
@@ -199,6 +272,7 @@ def train(hyps, verbose=True):
                                           b/len(train_loader)*100)
             print(s, end=len(s)*" " + "\r")
             if hyps['exp_name'] == "test" and b>5: break
+
         print()
         optimizer.zero_grad()
         mask_train_loss = mask_avg_loss/len(train_loader)
@@ -214,10 +288,30 @@ def train(hyps, verbose=True):
             stats_string+="Tr. Mask Loss:{:.5f} | Tr. Mask Acc:{:.5f}\n"
             stats_string = stats_string.format(mask_train_loss,
                                                mask_train_acc)
+        if c_preds is not None:
+            train_c_avg_loss = avg_c_loss/len(train_loader)
+            train_c_avg_acc =  avg_c_acc/len(train_loader)
+            train_c_avg_indy = avg_c_indy_acc/len(train_loader)
+            s = "Train - CLoss:{:.5f} | CAcc:{:.5f} | CIndy:{:.5f}\n"
+            stats_string += s.format(train_c_avg_loss,
+                                    train_c_avg_acc,
+                                    train_c_avg_indy)
+        else:
+            train_c_avg_loss = 0
+            train_c_avg_acc  = 0
+            train_c_avg_indy = 0
+        if z_preds is not None:
+            train_z_avg_loss = avg_z_loss/len(train_loader)
+            stats_string+="Train - ZLoss:{:.5f}\n".format(train_z_avg_loss)
+        else: train_z_avg_loss = 0
         model.eval()
         avg_loss = 0
         avg_acc = 0
         avg_indy_acc = 0
+        avg_c_loss = 0
+        avg_c_acc = 0
+        avg_c_indy_acc = 0
+        avg_z_loss = 0
         mask_avg_loss = 0
         mask_avg_acc = 0
         print("Validating...")
@@ -240,7 +334,16 @@ def train(hyps, verbose=True):
                     z = tup[-1].to(DEVICE)
                 elif len(tup) == 4: 
                     z,c = tup[-2].to(DEVICE), tup[-1].to(DEVICE)
+                    c_targs = c[:,1:]
+                    c = c[:,:-1]
+                    c_og_shape = c.shape
+                    z_targs = z[:,1:]
+                    z_og_shape = z_targs.shape
+                    z = z[:,:-1]
                 preds = model(x.to(DEVICE), y.to(DEVICE), z, c)
+                c_preds,z_preds = None, None
+                if isinstance(preds,tuple):
+                    preds,c_preds,z_preds = preds
 
                 if hyps['masking_task']:
                     # Mask loss and acc
@@ -263,38 +366,91 @@ def train(hyps, verbose=True):
                 # Tot loss and acc
                 preds = preds.reshape(-1,preds.shape[-1])
                 targs = targs.reshape(-1).to(DEVICE)
-                loss = lossfxn(preds,targs)
-                preds = torch.argmax(preds,dim=-1).reshape(og_shape)
-                targs = targs.reshape(og_shape)
+                bitmask = targs!=mask_idx
+                loss = lossfxn(preds[bitmask],targs[bitmask])
+                preds = torch.argmax(preds,dim=-1)
                 sl = og_shape[-1]
                 eq = (preds==targs).float()
+                indy_acc = eq[bitmask].mean()
+                eq[~bitmask] = 1
+                eq = eq.reshape(og_shape)
                 acc = (eq.sum(-1)==sl).float().mean()
-                indy_acc = eq.mean()
-                if b == rand_word_batch or hyps['exp_name']=="test":
-                    rand = int(np.random.randint(0,len(targs)))
-                    question = x[rand]
-                    whr = torch.where(question==mask_idx)[0]
-                    endx=len(question) if len(whr)==0 else whr[0].item()
-                    question = question[:endx]
-                    targ_samp = targs[rand]
-                    whr = torch.where(targ_samp==mask_idx)[0]
-                    endx=len(targ_samp) if len(whr)==0 else whr[0].item()
-                    targ_samp = targ_samp[:endx]
-                    pred_samp = preds[rand,:endx]
-                    idx2word = train_data.idx2word
-                    if len(question.shape) == 1:
-                        question=[idx2word[p.item()] for p in question]
-                    else: 
-                        question = "img based question"
-                    pred_samp = [idx2word[p.item()] for p in pred_samp]
-                    targ_samp = [idx2word[p.item()] for p in targ_samp]
-                    question = " ".join(question)
-                    pred_samp = " ".join(pred_samp)
-                    targ_samp = " ".join(targ_samp)
-
                 avg_acc += acc.item()
                 avg_indy_acc += indy_acc.item()
                 avg_loss += loss.item()
+                if c_preds is not None:
+                    c_preds = c_preds.reshape(-1,c_preds.shape[-1])
+                    c_targs = c_targs.reshape(-1).to(DEVICE)
+                    c_bitmask = c_targs!=mask_idx
+                    c_loss = lossfxn(c_preds[c_bitmask],
+                                     c_targs[c_bitmask])
+                    c_preds = torch.argmax(c_preds,dim=-1)
+                    sl = c_og_shape[-1]
+                    eq = (c_preds==c_targs).float()
+                    c_indy_acc = eq.reshape(-1)[c_bitmask].mean()
+                    eq[~c_bitmask] = 1
+                    eq = eq.reshape(c_og_shape)
+                    c_acc = (eq.sum(-1)==sl).float().mean()
+                    avg_c_acc += c_acc.item()
+                    avg_c_indy_acc += c_indy_acc.item()
+                    avg_c_loss += c_loss.item()
+                if z_preds is not None:
+                    z_targs = z_targs.to(DEVICE)
+                    z_bitmask = z_targs > null_loc
+                    z_loss = F.mse_loss(z_preds[z_bitmask],
+                                        z_targs[z_bitmask])
+                    avg_z_loss += z_loss.item()
+
+                if b == rand_word_batch or hyps['exp_name']=="test":
+                    rand = int(np.random.randint(0,len(x)))
+                    question = x[rand]
+                    if len(question.shape) == 1:
+                        whr = torch.where(question==mask_idx)[0]
+                        endx = len(question)
+                        if len(whr)!=0: endx = whr[0].item()
+                        question = question[:endx]
+                        question=[idx2word[p.item()] for p in question]
+                    else: 
+                        question = "img based question"
+                    targ_samp = targs.reshape(og_shape)[rand]
+                    whr = torch.where(targ_samp==mask_idx)[0]
+                    endx = len(targ_samp)
+                    if len(whr)>0: endx = whr[0].item()
+                    targ_samp = targ_samp[:endx]
+                    pred_samp = preds.reshape(og_shape)[rand,:endx]
+                    idx2word = train_data.idx2word
+                    targ_samp = [idx2word[p.item()] for p in targ_samp]
+                    pred_samp = [idx2word[p.item()] for p in pred_samp]
+                    question = " ".join(question)
+                    targ_samp = " ".join(targ_samp)
+                    pred_samp = " ".join(pred_samp)
+                    if c_preds is not None:
+                        ct_samp = c_targs.reshape(c_og_shape)[rand]
+                        mask = ct_samp!=mask_idx
+                        ct_samp = ct_samp[mask]
+                        ct_samp = [idx2word[a.item()] for a in ct_samp]
+                        cp_samp=c_preds.reshape(c_og_shape)[rand][mask]
+                        cp_samp = [idx2word[p.item()] for p in cp_samp]
+                        c_targ_samp = " ".join(ct_samp)
+                        c_pred_samp = " ".join(cp_samp)
+
+                    if z_preds is not None:
+                        zt_samp = z_targs.reshape(z_og_shape)[rand]
+                        mask = zt_samp[:,0] > null_loc
+
+                        zt_samp = zt_samp[mask]
+                        s = "{:.3f} "*len(zt_samp[:,0])
+
+                        ztx = s.format(*zt_samp[:,0].tolist())
+                        z_targ_sampx = ztx
+                        zty = s.format(*zt_samp[:,1].tolist())
+                        z_targ_sampy = zty
+                        zp_samp = z_preds.reshape(z_og_shape)[rand][mask]
+                        zpx = s.format(*zp_samp[:,0].tolist())
+                        z_pred_sampx = zpx
+                        zpy = s.format(*zp_samp[:,1].tolist())
+                        z_pred_sampy = zpy
+
                 if hyps["masking_task"]:
                     s = "Mask Loss:{:.5f} | Acc:{:.5f} | {:.0f}%"
                     s = s.format(mask_loss.item(), mask_acc.item(),
@@ -305,6 +461,8 @@ def train(hyps, verbose=True):
                                               b/len(val_loader)*100)
                 print(s, end=len(s)*" " + "\r")
                 if hyps['exp_name']=="test" and b > 5: break
+
+
         print()
         mask_val_loss = mask_avg_loss/len(val_loader)
         mask_val_acc = mask_avg_acc/  len(val_loader)
@@ -318,9 +476,32 @@ def train(hyps, verbose=True):
         if hyps['masking_task']:
             stats_string+="Val Mask Loss:{:.5f} | Val Mask Acc:{:.5f}\n"
             stats_string=stats_string.format(mask_avg_loss,mask_avg_acc)
+        if c_preds is not None:
+            val_c_avg_loss = avg_c_loss/len(val_loader)
+            val_c_avg_acc = avg_c_acc/len(val_loader)
+            val_c_avg_indy = avg_c_indy_acc/len(val_loader)
+            s = "Val - CLoss:{:.5f} | CAcc:{:.5f} | CIndy:{:.5f}\n"
+            stats_string += s.format(val_c_avg_loss,val_c_avg_acc,
+                                                    val_c_avg_indy)
+        else:
+            val_c_avg_loss = 0
+            val_c_avg_acc  = 0
+            val_c_avg_indy = 0
+        if z_preds is not None:
+            val_z_avg_loss = avg_z_loss/len(train_loader)
+            stats_string += "Val - ZLoss:{:.5f}\n".format(val_z_avg_loss)
+        else: val_z_avg_loss = 0
         stats_string += "Quest: " + question + "\n"
         stats_string += "Targ: " + targ_samp + "\n"
         stats_string += "Pred: " + pred_samp + "\n"
+        if c_preds is not None:
+            stats_string += "CTarg: " + c_targ_samp + "\n"
+            stats_string += "CPred: " + c_pred_samp + "\n"
+        if z_preds is not None:
+            stats_string += "ZTargX: " + z_targ_sampx + "\n"
+            stats_string += "ZPredX: " + z_pred_sampx + "\n"
+            stats_string += "ZTargY: " + z_targ_sampy + "\n"
+            stats_string += "ZPredY: " + z_pred_sampy + "\n"
         optimizer.zero_grad()
 
         save_dict = {
@@ -336,6 +517,14 @@ def train(hyps, verbose=True):
             "val_indy":val_avg_indy,
             "mask_val_loss":mask_val_loss,
             "mask_val_acc":mask_val_acc,
+            "train_c_loss":train_c_avg_loss,
+            "train_c_acc":train_c_avg_acc,
+            "train_c_indy":train_c_avg_indy,
+            "val_c_loss":val_c_avg_loss,
+            "val_c_acc":val_c_avg_acc,
+            "val_c_indy":val_c_avg_indy,
+            "train_z_loss":train_z_avg_loss,
+            "val_z_loss":val_z_avg_loss,
             "state_dict":model.state_dict(),
             "optim_dict":optimizer.state_dict(),
             "word2idx":train_data.word2idx,
@@ -396,172 +585,4 @@ def mask_words(x,y,mask_p=.15,mask_idx=0):
     mask = torch.cat([mask,postpender],dim=-1)[...,1:].bool()
     y[mask] = mask_idx
     return x,y,mask
-
-def get_exp_num(exp_folder, exp_name):
-    """
-    Finds the next open experiment id number.
-
-    exp_folder: str
-        path to the main experiment folder that contains the model
-        folders
-    exp_name: str
-        the name of the experiment
-    """
-    exp_folder = os.path.expanduser(exp_folder)
-    _, dirs, _ = next(os.walk(exp_folder))
-    exp_nums = set()
-    for d in dirs:
-        splt = d.split("_")
-        if len(splt) >= 2 and splt[0] == exp_name:
-            try:
-                exp_nums.add(int(splt[1]))
-            except:
-                pass
-    for i in range(len(exp_nums)):
-        if i not in exp_nums:
-            return i
-    return len(exp_nums)
-
-def get_save_folder(hyps):
-    """
-    Creates the save name for the model.
-
-    hyps: dict
-        keys:
-            exp_name: str
-            exp_num: int
-            search_keys: str
-    """
-    save_folder = "{}/{}_{}".format(hyps['main_path'],
-                                    hyps['exp_name'],
-                                    hyps['exp_num'])
-    save_folder += hyps['search_keys']
-    return save_folder
-
-def record_session(hyps, model):
-    """
-    Writes important parameters to file.
-
-    hyps: dict
-        dict of relevant hyperparameters
-    model: torch nn.Module
-        the model to be trained
-    """
-    sf = hyps['save_folder']
-    if not os.path.exists(sf):
-        os.mkdir(sf)
-    h = "hyperparams"
-    with open(os.path.join(sf,h+".txt"),'w') as f:
-        f.write(str(model)+'\n')
-        for k in sorted(hyps.keys()):
-            f.write(str(k) + ": " + str(hyps[k]) + "\n")
-    temp_hyps = dict()
-    keys = list(hyps.keys())
-    temp_hyps = {k:v for k,v in hyps.items()}
-    for k in keys:
-        if type(hyps[k]) == type(np.array([])):
-            del temp_hyps[k]
-    with open(os.path.join(sf,h+".json"),'w') as f:
-        json.dump(temp_hyps, f)
-
-def fill_hyper_q(hyps, hyp_ranges, keys, hyper_q, idx=0):
-    """
-    Recursive function to load each of the hyperparameter combinations
-    onto a queue.
-
-    hyps - dict of hyperparameters created by a HyperParameters object
-        type: dict
-        keys: name of hyperparameter
-        values: value of hyperparameter
-    hyp_ranges - dict of lists
-        these are the ranges that will change the hyperparameters for
-        each search
-        type: dict
-        keys: name of hyperparameters to be searched over
-        values: list of values to search over for that hyperparameter
-    keys - keys of the hyperparameters to be searched over. Used to
-        specify order of keys to search
-    hyper_q - Queue to hold all parameter sets
-    idx - the index of the current key to be searched over
-
-    Returns:
-        hyper_q: Queue of dicts `hyps`
-    """
-    # Base call, runs the training and saves the result
-    if idx >= len(keys):
-        # Load q
-        hyps['search_keys'] = ""
-        for k in keys:
-            hyps['search_keys'] += "_" + str(k)+str(hyps[k])
-        hyper_q.put({k:v for k,v in hyps.items()})
-
-    # Non-base call. Sets a hyperparameter to a new search value and
-    # passes down the dict.
-    else:
-        key = keys[idx]
-        for param in hyp_ranges[key]:
-            hyps[key] = param
-            hyper_q = fill_hyper_q(hyps, hyp_ranges, keys, hyper_q,
-                                                             idx+1)
-    return hyper_q
-
-def hyper_search(hyps, hyp_ranges):
-    """
-    The top level function to create hyperparameter combinations and
-    perform trainings.
-
-    hyps: dict
-        the initial hyperparameter dict
-        keys: str
-        vals: values for the hyperparameters specified by the keys
-    hyp_ranges: dict
-        these are the ranges that will change the hyperparameters for
-        each search. A unique training is performed for every
-        possible combination of the listed values for each key
-        keys: str
-        vals: lists of values for the hyperparameters specified by the
-              keys
-    """
-    starttime = time.time()
-    # Make results file
-    main_path = hyps['exp_name']
-    if "save_root" in hyps:
-        hyps['save_root'] = os.path.expanduser(hyps['save_root'])
-        if not os.path.exists(hyps['save_root']):
-            os.mkdir(hyps['save_root'])
-        main_path = os.path.join(hyps['save_root'], main_path)
-    if not os.path.exists(main_path):
-        os.mkdir(main_path)
-    hyps['main_path'] = main_path
-    results_file = os.path.join(main_path, "results.txt")
-    with open(results_file,'a') as f:
-        f.write("Hyperparameters:\n")
-        for k in hyps.keys():
-            if k not in hyp_ranges:
-                f.write(str(k) + ": " + str(hyps[k]) + '\n')
-        f.write("\nHyperranges:\n")
-        for k in hyp_ranges.keys():
-            rs = ",".join([str(v) for v in hyp_ranges[k]])
-            s = str(k) + ": [" + rs +']\n'
-            f.write(s)
-        f.write('\n')
-
-    hyper_q = Queue()
-    hyper_q = fill_hyper_q(hyps, hyp_ranges, list(hyp_ranges.keys()),
-                                                      hyper_q, idx=0)
-    total_searches = hyper_q.qsize()
-    print("n_searches:", total_searches)
-
-    result_count = 0
-    print("Starting Hyperloop")
-    while not hyper_q.empty():
-        print("Searches left:", hyper_q.qsize(),"-- Running Time:",
-                                             time.time()-starttime)
-        hyps = hyper_q.get()
-
-        results = train(hyps, verbose=True)
-        with open(results_file,'a') as f:
-            results = " -- ".join([str(k)+":"+str(results[k]) for\
-                                     k in sorted(results.keys())])
-            f.write("\n"+results+"\n")
 
