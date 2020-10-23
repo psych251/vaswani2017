@@ -1,3 +1,5 @@
+import bcolz
+from tqdm import tqdm
 import pandas as pd
 from collections import defaultdict
 import numpy as np
@@ -22,6 +24,7 @@ class EngGerDataset(Dataset):
                                                    START="<START>",
                                                    STOP="<STOP>",
                                                    exp_name="",
+                                                   max_context=None,
                                                    **kwargs):
         """
         data_folder: str
@@ -40,16 +43,22 @@ class EngGerDataset(Dataset):
             the stop token
         exp_name: str
             name of the experiment
+        max_context: int
+            the maximum sequence length
         """
         self.data_folder = os.path.expanduser(data_folder)
         self.en_path = os.path.join(data_folder, "train.en")
         self.de_path = os.path.join(data_folder, "train.de")
         self.eng_to_ger = eng_to_ger
+        self.vocab_size = vocab_size
         self.MASK = MASK
         self.START = START
         self.STOP = STOP
+        self.max_context = max_context
         self.en_tok_path = os.path.join(self.data_folder,"en_tokenizer")
         self.de_tok_path = os.path.join(self.data_folder,"de_tokenizer")
+        self.en_arr_path = os.path.join(self.data_folder,"en_bcolz")
+        self.de_arr_path = os.path.join(self.data_folder,"de_bcolz")
 
         # Train tokenizers
         print("Tokenizing english..")
@@ -89,47 +98,78 @@ class EngGerDataset(Dataset):
         self.de_stop_idx = self.de_tokenizer.token_to_id(self.STOP)
 
         # Get English sentence lists
-        self.en_max_len = 0
-        self.en_idxs = []
-        with open(self.en_path, 'r') as f:
-            for i,l in enumerate(f.readlines()):
-                l = l.strip()
-                if len(l) > 0:
-                    output = self.en_tokenizer.encode(l)
-                    ids = [self.en_start_idx]+list(output.ids)\
-                                             +[self.en_stop_idx]
-                    self.en_idxs.append(ids)
-                    if len(ids) > self.en_max_len:
-                        self.en_max_len = len(ids)
-                if exp_name == "test" and i > 100:
-                    break
-        mask = [self.en_mask_idx for i in range(self.en_max_len)]
-        l = 0
-        for i in range(len(self.en_idxs)):
-            diff = self.en_max_len - len(self.en_idxs[i])
-            self.en_idxs[i] = self.en_idxs[i] + mask[:diff]
-        self.en_idxs = torch.LongTensor(self.en_idxs)
+        print("Making english idxs")
+        if os.path.exists(self.en_arr_path):
+            print("loading from bcolz", self.en_arr_path)
+            self.en_idxs = bcolz.carray(rootdir=self.en_arr_path,
+                                        dtype=np.int)
+            self.en_max_len = self.en_idxs.shape[-1]
+        else:
+            self.en_max_len = 0
+            self.en_idxs = []
+            with open(self.en_path, 'r') as f:
+                for i,l in tqdm(enumerate(f.readlines())):
+                    l = l.strip()
+                    if len(l) > 0:
+                        output = self.en_tokenizer.encode(l)
+                        ids = [self.en_start_idx]+list(output.ids)\
+                                                 +[self.en_stop_idx]
+                        self.en_idxs.append(ids)
+                        if len(ids) > self.en_max_len:
+                            self.en_max_len = len(ids)
+                    if exp_name == "test" and i > 100:
+                        break
+            mask = [self.en_mask_idx for i in range(self.en_max_len)]
+            l = 0
+            print("Padding english idxs")
+            for i in tqdm(range(len(self.en_idxs))):
+                diff = self.en_max_len - len(self.en_idxs[i])
+                self.en_idxs[i] = self.en_idxs[i] + mask[:diff]
+            print("Saving to bcolz")
+            self.en_idxs = bcolz.carray(self.en_idxs,
+                                        rootdir=self.en_arr_path,
+                                        dtype="int32")
+            self.en_idxs.flush()
+        if self.en_max_len > max_context:
+            print("Truncating context from", self.en_max_len,
+                                       "to", self.max_context)
+            self.en_max_len = self.max_context
 
         # Get German Sentence Lists
-        self.de_max_len = 0
-        self.de_idxs = []
-        with open(self.de_path, 'r') as f:
-            for i,l in enumerate(f.readlines()):
-                l = l.strip()
-                if len(l) > 0:
-                    output = self.de_tokenizer.encode(l)
-                    ids = [self.de_start_idx]+list(output.ids)\
-                                             +[self.de_stop_idx]
-                    self.de_idxs.append(ids)
-                    if len(ids) > self.de_max_len:
-                        self.de_max_len = len(ids)
-                if exp_name == "test" and i > 100:
-                    break
-        mask = [self.de_mask_idx for i in range(self.de_max_len)]
-        for i in range(len(self.de_idxs)):
-            diff = self.de_max_len - len(self.de_idxs[i])
-            self.de_idxs[i] = self.de_idxs[i] + mask[:diff]
-        self.de_idxs = torch.LongTensor(self.de_idxs)
+        print("Making german idxs")
+        if os.path.exists(self.de_arr_path):
+            print("loading from bcolz", self.de_arr_path)
+            self.de_idxs = bcolz.carray(rootdir=self.de_arr_path)
+            self.de_max_len = self.de_idxs.shape[-1]
+        else:
+            self.de_max_len = 0
+            self.de_idxs = []
+            with open(self.de_path, 'r') as f:
+                for i,l in tqdm(enumerate(f.readlines())):
+                    l = l.strip()
+                    if len(l) > 0:
+                        output = self.de_tokenizer.encode(l)
+                        ids = [self.de_start_idx]+list(output.ids)\
+                                                 +[self.de_stop_idx]
+                        self.de_idxs.append(ids)
+                        if len(ids) > self.de_max_len:
+                            self.de_max_len = len(ids)
+                    if exp_name == "test" and i > 100:
+                        break
+            mask = [self.de_mask_idx for i in range(self.de_max_len)]
+            print("Padding german idxs")
+            for i in tqdm(range(len(self.de_idxs))):
+                diff = self.de_max_len - len(self.de_idxs[i])
+                self.de_idxs[i] = self.de_idxs[i] + mask[:diff]
+            print("Saving to bcolz")
+            self.de_idxs = bcolz.carray(self.de_idxs,
+                                        rootdir=self.de_arr_path,
+                                        dtype="int32")
+            self.de_idxs.flush()
+        if self.de_max_len > max_context:
+            print("Truncating context from", self.de_max_len,
+                                       "to", self.max_context)
+            self.de_max_len = self.max_context
 
         if self.eng_to_ger:
             self.X = self.en_idxs
@@ -137,31 +177,36 @@ class EngGerDataset(Dataset):
             self.X_mask_idx = self.en_mask_idx
             self.X_start_idx = self.en_start_idx
             self.X_stop_idx = self.en_stop_idx
+            self.X_max_len = self.en_max_len
 
             self.Y = self.de_idxs
             self.Y_tokenizer = self.de_tokenizer
             self.Y_mask_idx = self.de_mask_idx
             self.Y_start_idx = self.de_start_idx
             self.Y_stop_idx = self.de_stop_idx
+            self.Y_max_len = self.de_max_len
         else:
             self.X = self.de_idxs
             self.X_tokenizer = self.de_tokenizer
             self.X_mask_idx = self.de_mask_idx
             self.X_start_idx = self.de_start_idx
             self.X_stop_idx = self.de_stop_idx
+            self.X_max_len = self.de_max_len
 
             self.Y = self.en_idxs
             self.Y_tokenizer = self.en_tokenizer
             self.Y_mask_idx = self.en_mask_idx
             self.Y_start_idx = self.en_start_idx
             self.Y_stop_idx = self.en_stop_idx
-
+            self.Y_max_len = self.en_max_len
 
     def __len__(self):
         return len(self.en_idxs)
     
     def __getitem__(self,i):
-        return self.X[i],self.Y[i]
+        x = np.asarray(self.X[int(i),:self.X_max_len])
+        y = np.asarray(self.Y[int(i),:self.Y_max_len])
+        return torch.LongTensor(x),torch.LongTensor(y)
 
     def X_idxs2tokens(self, idxs):
         """
@@ -203,16 +248,8 @@ class DatasetWrapper(Dataset):
         return len(self.idxs)
 
     def __getitem__(self, idx):
-        try:
-            idx = self.idxs[idx]
-            return self.dataset[idx]
-        except FileNotFoundError as e:
-            while True:
-                try:
-                    idx = rand_sample(self.idxs)
-                    return self.dataset[idx]
-                except FileNotFoundError as e:
-                    pass
+        idx = self.idxs[idx]
+        return self.dataset[idx]
 
 def get_data(dataset, shuffle=True, **kwargs):
     dataset = globals()[dataset](**kwargs)

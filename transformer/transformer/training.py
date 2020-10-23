@@ -112,9 +112,9 @@ def train(hyps, verbose=True):
         avg_indy_acc = 0
         model.train()
         print("Training...")
-        torch.cuda.empty_cache()
         optimizer.zero_grad()
         for b,(x,y) in enumerate(train_loader):
+            torch.cuda.empty_cache()
             targs = y.data[:,1:]
             og_shape = targs.shape
             y = y[:,:-1]
@@ -122,8 +122,10 @@ def train(hyps, verbose=True):
             preds = torch.argmax(logits,dim=-1)
 
             if epoch % 3 == 0 and b == 0:
+                inp = x[0].data.cpu().numpy()
                 trg = targs[0].data.numpy()
                 prd = preds[0].data.cpu().numpy()
+                print("Inp:", train_data.X_idxs2tokens(inp))
                 print("Targ:", train_data.Y_idxs2tokens(trg))
                 print("Pred:", train_data.Y_idxs2tokens(prd))
 
@@ -155,7 +157,7 @@ def train(hyps, verbose=True):
             s = s.format(loss.item(), acc.item(),
                                       b/len(train_loader)*100)
             print(s, end=len(s)*" " + "\r")
-            if hyps['exp_name'] == "test" and b>2: break
+            if hyps['exp_name'] == "test" and b>5: break
 
         print()
         optimizer.zero_grad()
@@ -200,6 +202,8 @@ def train(hyps, verbose=True):
 
                 if b == rand_word_batch or hyps['exp_name']=="test":
                     rand = int(np.random.randint(0,len(x)))
+                    inp = x.data[rand].cpu().numpy()
+                    inp_samp = val_data.X_idxs2tokens(inp)
                     trg=targs.reshape(og_shape)[rand].data.cpu().numpy()
                     targ_samp = val_data.Y_idxs2tokens(trg)
                     prd=preds.reshape(og_shape)[rand].data.cpu().numpy()
@@ -219,6 +223,7 @@ def train(hyps, verbose=True):
         stats_string += "Val - Loss:{:.5f} | Acc:{:.5f} | Indy:{:.5f}\n"
         stats_string = stats_string.format(val_avg_loss,val_avg_acc,
                                                         val_avg_indy)
+        stats_string += "Inp: "  + inp_samp  + "\n"
         stats_string += "Targ: " + targ_samp + "\n"
         stats_string += "Pred: " + pred_samp + "\n"
         optimizer.zero_grad()
