@@ -11,6 +11,7 @@ import random
 import skimage.io
 from transformer.utils import get_max_key
 from tokenizers import CharBPETokenizer
+import ml_utils.datas
 
 class EngGerDataset(Dataset):
     """
@@ -20,6 +21,7 @@ class EngGerDataset(Dataset):
                                                    MASK="<MASK>",
                                                    START="<START>",
                                                    STOP="<STOP>",
+                                                   exp_name="",
                                                    **kwargs):
         """
         data_folder: str
@@ -36,6 +38,8 @@ class EngGerDataset(Dataset):
             the start token
         STOP: str
             the stop token
+        exp_name: str
+            name of the experiment
         """
         self.data_folder = os.path.expanduser(data_folder)
         self.en_path = os.path.join(data_folder, "train.en")
@@ -44,40 +48,63 @@ class EngGerDataset(Dataset):
         self.MASK = MASK
         self.START = START
         self.STOP = STOP
+        self.en_tok_path = os.path.join(self.data_folder,"en_tokenizer")
+        self.de_tok_path = os.path.join(self.data_folder,"de_tokenizer")
 
         # Train tokenizers
         print("Tokenizing english..")
         self.en_tokenizer = CharBPETokenizer()
-        self.en_tokenizer.train(self.en_path,vocab_size=vocab_size)
+        if os.path.exists(self.en_tok_path): # Load trained tokenizer
+            print("loading from pretrained tokenizer", self.en_tok_path)
+            self.en_tokenizer = ml_utils.datas.load_tokenizer(
+                                               self.en_tokenizer,
+                                               self.en_tok_path)
+        else:
+            self.en_tokenizer.train([self.en_path],vocab_size=vocab_size)
+            os.mkdir(self.en_tok_path)
+            self.en_tokenizer.save_model(self.en_tok_path)
         self.en_tokenizer.add_special_tokens([self.MASK])
-        self.en_mask_idx = self.en_tokenzier.token_to_id(self.MASK)
-        self.en_tokenizer.add_special_tokens([self.START])
-        self.en_start_idx = self.en_tokenzier.token_to_id(self.START)
-        self.en_tokenizer.add_special_tokens([self.STOP])
-        self.en_stop_idx = self.en_tokenzier.token_to_id(self.STOP)
+        self.en_tokenizer.add_tokens([self.START])
+        self.en_tokenizer.add_tokens([self.STOP])
+        self.en_mask_idx = self.en_tokenizer.token_to_id(self.MASK)
+        self.en_start_idx = self.en_tokenizer.token_to_id(self.START)
+        self.en_stop_idx = self.en_tokenizer.token_to_id(self.STOP)
+
         print("Tokenizing german..")
         self.de_tokenizer = CharBPETokenizer()
-        self.de_tokenizer.train(self.de_path,vocab_size=vocab_size)
+        if os.path.exists(self.de_tok_path): # Load trained tokenizer
+            print("loading from pretrained tokenizer", self.de_tok_path)
+            self.de_tokenizer = ml_utils.datas.load_tokenizer(
+                                               self.de_tokenizer,
+                                               self.de_tok_path)
+        else:
+            self.de_tokenizer.train([self.de_path],vocab_size=vocab_size)
+            os.mkdir(self.de_tok_path)
+            self.de_tokenizer.save_model(self.de_tok_path)
         self.de_tokenizer.add_special_tokens([self.MASK])
-        self.de_mask_idx = self.de_tokenzier.tokde_to_id(self.MASK)
-        self.de_tokenizer.add_special_tokens([self.START])
-        self.de_start_idx = self.de_tokenzier.tokde_to_id(self.START)
-        self.de_tokenizer.add_special_tokens([self.STOP])
-        self.de_stop_idx = self.de_tokenzier.tokde_to_id(self.STOP)
+        self.de_tokenizer.add_tokens([self.START])
+        self.de_tokenizer.add_tokens([self.STOP])
+        self.de_mask_idx = self.de_tokenizer.token_to_id(self.MASK)
+        self.de_start_idx = self.de_tokenizer.token_to_id(self.START)
+        self.de_stop_idx = self.de_tokenizer.token_to_id(self.STOP)
 
         # Get English sentence lists
         self.en_max_len = 0
         self.en_idxs = []
         with open(self.en_path, 'r') as f:
-            for l in f.readlines():
+            for i,l in enumerate(f.readlines()):
                 l = l.strip()
                 if len(l) > 0:
                     output = self.en_tokenizer.encode(l)
-                    ids=[self.en_start_idx]+output.ids+[self.en_stop_idx]
+                    ids = [self.en_start_idx]+list(output.ids)\
+                                             +[self.en_stop_idx]
                     self.en_idxs.append(ids)
-                    if len(output.ids) > self.en_max_len:
-                        self.en_max_len = len(output.ids)
+                    if len(ids) > self.en_max_len:
+                        self.en_max_len = len(ids)
+                if exp_name == "test" and i > 100:
+                    break
         mask = [self.en_mask_idx for i in range(self.en_max_len)]
+        l = 0
         for i in range(len(self.en_idxs)):
             diff = self.en_max_len - len(self.en_idxs[i])
             self.en_idxs[i] = self.en_idxs[i] + mask[:diff]
@@ -87,14 +114,17 @@ class EngGerDataset(Dataset):
         self.de_max_len = 0
         self.de_idxs = []
         with open(self.de_path, 'r') as f:
-            for l in f.readlines():
+            for i,l in enumerate(f.readlines()):
                 l = l.strip()
                 if len(l) > 0:
                     output = self.de_tokenizer.encode(l)
-                    ids=[self.de_start_idx]+output.ids+[self.de_stop_idx]
+                    ids = [self.de_start_idx]+list(output.ids)\
+                                             +[self.de_stop_idx]
                     self.de_idxs.append(ids)
-                    if len(output.ids) > self.de_max_len:
-                        self.de_max_len = len(output.ids)
+                    if len(ids) > self.de_max_len:
+                        self.de_max_len = len(ids)
+                if exp_name == "test" and i > 100:
+                    break
         mask = [self.de_mask_idx for i in range(self.de_max_len)]
         for i in range(len(self.de_idxs)):
             diff = self.de_max_len - len(self.de_idxs[i])
@@ -126,11 +156,12 @@ class EngGerDataset(Dataset):
             self.Y_start_idx = self.en_start_idx
             self.Y_stop_idx = self.en_stop_idx
 
+
     def __len__(self):
         return len(self.en_idxs)
     
     def __getitem__(self,i):
-        return self.X_idxs[i],self.Y_idxs[i]
+        return self.X[i],self.Y[i]
 
     def X_idxs2tokens(self, idxs):
         """

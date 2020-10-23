@@ -1,13 +1,12 @@
 {
-    "exp_name":"test",
+    "exp_name":"firstrun",
     "save_root":"/data2/pdplab/grantsrb/transformer",
-    "init_checkpt":null,
     "description":"",
     "del_prev_sd":true,
     "seed":0,
     "multi_gpu":true,
 
-    "dataset":"TallyQA",
+    "dataset":"EngGerDataset",
     "data_folder":"/data2/pdplab/grantsrb/wmt_data/en-de_2014/",
     "eng_to_ger":true,
     "shuffle":true,
@@ -22,12 +21,12 @@
     "enc_slen":null,
     "dec_slen":null,
 
-    "emb_size":512,
-    "class_h_size":1000,
+    "emb_size":100,
+    "class_h_size":2000,
     "attn_size":64,
     "n_heads":8,
-    "enc_layers":2,
-    "dec_layers":2,
+    "enc_layers":8,
+    "dec_layers":8,
     "ordered_preds":true,
     "enc_mask":false,
     "class_bnorm":true,
@@ -40,6 +39,6 @@
     "enc_drop_p":0,
     "dec_drop_p":0,
     "n_epochs":200,
-    "batch_size":128,
-    "n_loss_loops":1
+    "batch_size":32,
+    "n_loss_loops":4
 }

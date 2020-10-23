@@ -60,31 +60,13 @@ def train(hyps, verbose=True):
     if "shuffle_split" not in hyps and hyps['shuffle']:
         hyps['shuffle_split'] = True
     train_data,val_data = datas.get_data(**hyps)
-    if checkpt is not None:
-        tok_path = hyps['X_tok_path']
-        vocab = os.path.join(tok_path,"vocab.json")
-        merges = os.path.join(tok_path,"merges.txt")
-        train_data.X_tokenizer.from_file(vocab,merges)
-        tok_path = hyps['Y_tok_path']
-        vocab = os.path.join(tok_path,"vocab.json")
-        merges = os.path.join(tok_path,"merges.txt")
-        train_data.Y_tokenizer.from_file(vocab,merges)
-    else:
-        tok_path = os.path.join(hyps['save_folder'], "X_tokenizer")
-        os.path.mkdir(tok_path)
-        hyps['X_tok_path'] = tok_path
-        train_data.X_tokenizer.save_model(tok_path)
-        tok_path = os.path.join(hyps['save_folder'], "Y_tokenizer")
-        os.path.mkdir(tok_path)
-        hyps['Y_tok_path'] = tok_path
-        train_data.Y_tokenizer.save_model(tok_path)
 
     hyps['enc_slen'] = train_data.X.shape[-1]
-    hyps['dec_slen'] = train_data.Y.shape[-1] + 1
+    hyps['dec_slen'] = train_data.Y.shape[-1]
     hyps["mask_idx"] = train_data.X_tokenizer.token_to_id(MASK)
     hyps["dec_mask_idx"] = train_data.Y_tokenizer.token_to_id(MASK)
-    hyps['n_vocab'] = train_data.X_tokenizer.vocab_size
-    hyps['n_vocab_out'] = train_data.Y_tokenizer.vocab_size
+    hyps['n_vocab'] = train_data.X_tokenizer.get_vocab_size()
+    hyps['n_vocab_out'] = train_data.Y_tokenizer.get_vocab_size()
     train_loader = torch.utils.data.DataLoader(train_data,
                                     batch_size=hyps['batch_size'],
                                     shuffle=hyps['shuffle'])
@@ -114,7 +96,6 @@ def train(hyps, verbose=True):
         print("Beginning training for {}".format(hyps['save_folder']))
         print("train shape:", (len(train_data),*train_data.X.shape[1:]))
         print("val shape:", (len(val_data),*val_data.X.shape[1:]))
-        print("img shape:", hyps['img_shape'])
     record_session(hyps,model)
 
     if hyps['exp_name'] == "test":
@@ -137,19 +118,20 @@ def train(hyps, verbose=True):
             targs = y.data[:,1:]
             og_shape = targs.shape
             y = y[:,:-1]
-            preds = model(x.to(DEVICE), y.to(DEVICE))
+            logits = model(x.to(DEVICE), y.to(DEVICE))
+            preds = torch.argmax(logits,dim=-1)
 
             if epoch % 3 == 0 and b == 0:
                 trg = targs[0].data.numpy()
-                prd = preds[0].data.numpy()
+                prd = preds[0].data.cpu().numpy()
                 print("Targ:", train_data.Y_idxs2tokens(trg))
                 print("Pred:", train_data.Y_idxs2tokens(prd))
 
             # Tot loss
-            preds = preds.reshape(-1,preds.shape[-1])
+            logits = logits.reshape(-1,logits.shape[-1])
             targs = targs.reshape(-1).to(DEVICE)
             bitmask = targs!=mask_idx
-            loss = lossfxn(preds[bitmask],targs[bitmask])
+            loss = lossfxn(logits[bitmask],targs[bitmask])
 
             loss = loss/hyps['n_loss_loops']
             loss.backward()
@@ -158,7 +140,7 @@ def train(hyps, verbose=True):
                 optimizer.zero_grad()
 
             # Acc
-            preds = torch.argmax(preds,dim=-1)
+            preds = preds.reshape(-1)
             sl = og_shape[-1]
             eq = (preds==targs).float()
             indy_acc = eq[bitmask].mean()
@@ -218,9 +200,9 @@ def train(hyps, verbose=True):
 
                 if b == rand_word_batch or hyps['exp_name']=="test":
                     rand = int(np.random.randint(0,len(x)))
-                    trg = targs[rand].data.numpy()
+                    trg=targs.reshape(og_shape)[rand].data.cpu().numpy()
                     targ_samp = val_data.Y_idxs2tokens(trg)
-                    prd = prd[rand].data.numpy()
+                    prd=preds.reshape(og_shape)[rand].data.cpu().numpy()
                     pred_samp = val_data.Y_idxs2tokens(prd)
                 s = "Loss:{:.5f} | Acc:{:.5f} | {:.0f}%"
                 s = s.format(loss.item(), acc.item(),

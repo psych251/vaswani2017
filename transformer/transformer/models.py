@@ -920,6 +920,7 @@ class TransformerBase(nn.Module):
                                      stop_idx=None,
                                      dec_mask_idx=0,
                                      multi_init=False,
+                                     use_dec_embs=False,
                                      n_vocab_out=None,
                                      **kwargs):
         """
@@ -1157,7 +1158,8 @@ class Transformer(TransformerBase):
                 preds = self.classifier(decs)
                 preds = preds.reshape(len(y),1,preds.shape[-1])
                 pred_distr.append(preds)
-                if idx: argmaxs = torch.argmax(preds,dim=-1)
+                if self.idx_outputs:
+                    argmaxs = torch.argmax(preds,dim=-1)
                 else: argmaxs = decs
                 outputs = torch.cat([outputs,argmaxs],dim=1)
             preds = torch.cat(pred_distr,dim=1)
