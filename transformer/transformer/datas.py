@@ -18,6 +18,8 @@ class EngGerDataset(Dataset):
     """
     def __init__(self, data_path, eng_to_ger=True, vocab_size=50000,
                                                    MASK="<MASK>",
+                                                   START="<START>",
+                                                   STOP="<STOP>",
                                                    **kwargs):
         """
         data_path: str
@@ -30,12 +32,18 @@ class EngGerDataset(Dataset):
             the number of encodings for the byte-pair encoding scheme
         MASK: str
             the mask token
+        START: str
+            the start token
+        STOP: str
+            the stop token
         """
         self.data_path = os.path.expanduser(data_path)
         self.en_path = os.path.join(data_path, "train.en")
         self.de_path = os.path.join(data_path, "train.de")
         self.eng_to_ger = eng_to_ger
         self.MASK = MASK
+        self.START = START
+        self.STOP = STOP
 
         # Train tokenizers
         print("Tokenizing english..")
@@ -43,11 +51,19 @@ class EngGerDataset(Dataset):
         self.en_tokenizer.train(self.en_path,vocab_size=vocab_size)
         self.en_tokenizer.add_special_tokens([self.MASK])
         self.en_mask_idx = self.en_tokenzier.token_to_id(self.MASK)
+        self.en_tokenizer.add_special_tokens([self.START])
+        self.en_start_idx = self.en_tokenzier.token_to_id(self.START)
+        self.en_tokenizer.add_special_tokens([self.STOP])
+        self.en_stop_idx = self.en_tokenzier.token_to_id(self.STOP)
         print("Tokenizing german..")
         self.de_tokenizer = CharBPETokenizer()
         self.de_tokenizer.train(self.de_path,vocab_size=vocab_size)
         self.de_tokenizer.add_special_tokens([self.MASK])
         self.de_mask_idx = self.de_tokenzier.tokde_to_id(self.MASK)
+        self.de_tokenizer.add_special_tokens([self.START])
+        self.de_start_idx = self.de_tokenzier.tokde_to_id(self.START)
+        self.de_tokenizer.add_special_tokens([self.STOP])
+        self.de_stop_idx = self.de_tokenzier.tokde_to_id(self.STOP)
 
         # Get English sentence lists
         self.en_max_len = 0
@@ -57,7 +73,8 @@ class EngGerDataset(Dataset):
                 l = l.strip()
                 if len(l) > 0:
                     output = self.en_tokenizer.encode(l)
-                    self.en_idxs.append(output.ids)
+                    ids=[self.en_start_idx]+output.ids+[self.en_stop_idx]
+                    self.en_idxs.append(ids)
                     if len(output.ids) > self.en_max_len:
                         self.en_max_len = len(output.ids)
         mask = [self.en_mask_idx for i in range(self.en_max_len)]
@@ -74,7 +91,8 @@ class EngGerDataset(Dataset):
                 l = l.strip()
                 if len(l) > 0:
                     output = self.de_tokenizer.encode(l)
-                    self.de_idxs.append(output.ids)
+                    ids=[self.de_start_idx]+output.ids+[self.de_stop_idx]
+                    self.de_idxs.append(ids)
                     if len(output.ids) > self.de_max_len:
                         self.de_max_len = len(output.ids)
         mask = [self.de_mask_idx for i in range(self.de_max_len)]
@@ -83,14 +101,50 @@ class EngGerDataset(Dataset):
             self.de_idxs[i] = self.de_idxs[i] + mask[:diff]
         self.de_idxs = torch.LongTensor(self.de_idxs)
 
-        self.X = self.en_idxs if self.eng_to_ger else self.de_idxs
-        self.Y = self.de_idxs if self.eng_to_ger else self.en_idxs
+        if self.eng_to_ger:
+            self.X = self.en_idxs
+            self.X_tokenizer = self.en_tokenizer
+            self.X_mask_idx = self.en_mask_idx
+            self.X_start_idx = self.en_start_idx
+            self.X_stop_idx = self.en_stop_idx
+
+            self.Y = self.de_idxs
+            self.Y_tokenizer = self.de_tokenizer
+            self.Y_mask_idx = self.de_mask_idx
+            self.Y_start_idx = self.de_start_idx
+            self.Y_stop_idx = self.de_stop_idx
+        else:
+            self.X = self.de_idxs
+            self.X_tokenizer = self.de_tokenizer
+            self.X_mask_idx = self.de_mask_idx
+            self.X_start_idx = self.de_start_idx
+            self.X_stop_idx = self.de_stop_idx
+
+            self.Y = self.en_idxs
+            self.Y_tokenizer = self.en_tokenizer
+            self.Y_mask_idx = self.en_mask_idx
+            self.Y_start_idx = self.en_start_idx
+            self.Y_stop_idx = self.en_stop_idx
 
     def __len__(self):
         return len(self.en_idxs)
     
     def __getitem__(self,i):
-        return self.en_idxs[i],self.de_idxs[i]
+        return self.X_idxs[i],self.Y_idxs[i]
+
+    def X_idxs2tokens(self, idxs):
+        """
+        idxs: LongTensor (N,)
+            converts an array of tokens to a sentence
+        """
+        return self.X_tokenizer.decode(idxs)
+
+    def Y_idxs2tokens(self, idxs):
+        """
+        idxs: LongTensor (N,)
+            converts an array of tokens to a sentence
+        """
+        return self.Y_tokenizer.decode(idxs)
 
 class DatasetWrapper(Dataset):
     """
@@ -129,3 +183,13 @@ class DatasetWrapper(Dataset):
                 except FileNotFoundError as e:
                     pass
 
+def get_data(dataset, shuffle=True, **kwargs):
+    dataset = globals()[dataset](**kwargs)
+    if shuffle: perm = torch.randperm(len(dataset))
+    else: perm = torch.arange(len(dataset))
+    n_val = int(min(.2*len(dataset), 30000))
+    val_idxs = perm[:n_val]
+    train_idxs = perm[n_val:]
+    val_data = DatasetWrapper(dataset, val_idxs)
+    train_data = DatasetWrapper(dataset, train_idxs)
+    return train_data,val_data

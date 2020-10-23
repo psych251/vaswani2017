@@ -918,7 +918,9 @@ class TransformerBase(nn.Module):
                                      mask_idx=0,
                                      start_idx=None,
                                      stop_idx=None,
+                                     dec_mask_idx=0,
                                      multi_init=False,
+                                     n_vocab_out=None,
                                      **kwargs):
         """
         seq_len: int or None
@@ -984,9 +986,19 @@ class TransformerBase(nn.Module):
             the numeric index of the start token
         stop_idx: int
             the numeric index of the stop token
+        dec_mask_idx: int
+            the numeric index of the mask token for the decoding tokens
         multi_init: bool
             if true, the initialization vector has a unique value for
             each slot in the generated sequence
+        use_dec_embs: bool
+            determines if the decoding inputs use a unique embedding
+            layer. Defaults to true if n_vocab_out is not None and is
+            different than n_vocab.
+        n_vocab_out: int or None
+            the number of potential output words. Defaults to n_vocab
+            if None is argued. Additionally, if n_vocab_out is not None,
+            a new embedding is created for the decoding inputs.
         """
         super().__init__()
 
@@ -1015,8 +1027,15 @@ class TransformerBase(nn.Module):
         self.mask_idx = mask_idx
         self.start_idx = start_idx
         self.stop_idx = stop_idx
+        self.dec_mask_idx = dec_mask_idx
         self.multi_init = multi_init
-    
+        self.use_dec_embs = use_dec_embs
+        if n_vocab_out is None:
+            self.n_vocab_out = self.n_vocab
+        else:
+            self.use_dec_embs = use_dec_embs or n_vocab_out != n_vocab
+            self.n_vocab_out = n_vocab_out
+
     @property
     def is_cuda(self):
         try:
@@ -1033,12 +1052,30 @@ class Transformer(TransformerBase):
         print("enc_slen:", self.enc_slen)
         print("dec_slen:", self.dec_slen)
 
-        if not self.idx_inputs and not self.idx_outputs:
+        # Encoding Embedding Layer
+        # If we want to share the embedding but we don't want to index
+        # the inputs, we still want to create an embedding. But, if we
+        # dont want to index the outputs either, then we don't care
+        # if we want to share the embeddings or not
+        temp = (not self.use_dec_embs and not self.idx_outputs)
+        if not self.idx_inputs and temp:
             self.embeddings = None
         elif self.prob_embs: 
             self.embeddings =nn.Embedding(self.n_vocab,2*self.emb_size)
         else:
             self.embeddings = nn.Embedding(self.n_vocab, self.emb_size)
+
+        # Decoding Embedding Layer
+        if self.use_dec_embs and not self.idx_outputs:
+            self.dec_embeddings = None
+        elif not self.use_dec_embs:
+            self.dec_embeddings = self.embeddings
+        elif self.prob_embs:
+            self.dec_embeddings =nn.Embedding(self.n_vocab_out,
+                                              2*self.emb_size)
+        else:
+            self.dec_embeddings = nn.Embedding(self.n_vocab_out,
+                                               self.emb_size)
 
         self.encoder = Encoder(self.enc_slen,emb_size=self.emb_size,
                                             attn_size=self.attn_size,
@@ -1064,7 +1101,7 @@ class Transformer(TransformerBase):
                                             prob_embs=self.prob_embs)
 
         self.classifier = Classifier(self.emb_size,
-                                     self.n_vocab,
+                                     self.n_vocab_out,
                                      h_size=self.class_h_size,
                                      bnorm=self.class_bnorm,
                                      drop_p=self.class_drop_p,
@@ -1082,12 +1119,10 @@ class Transformer(TransformerBase):
             if true, the latent decodings are returned in addition to
             the classification predictions
         """
-        if self.embeddings is not None:
-            self.embeddings.weight.data[0,:] = 0 # Mask index
         if self.idx_inputs is not None and self.idx_inputs:
             embs = self.embeddings(x)
             if x_mask is None:
-                bitmask = (x==0)
+                bitmask = (x==self.mask_idx)
                 x_mask = bitmask.float().masked_fill(bitmask,-1e10)
         else:
             embs = x
@@ -1101,12 +1136,12 @@ class Transformer(TransformerBase):
             latns = []
             pred_distr = []
             outputs = y[:,:1]
-            idx = self.idx_outputs is not None and self.idx_outputs
-            if idx and y_mask is None:
-                y_mask = (y==0).masked_fill(y==0,-1e10)
+            if self.idx_outputs and y_mask is None:
+                bitmask = (y==self.dec_mask_idx)
+                y_mask = bitmask.masked_fill(bitmask,-1e10)
             for i in range(y.shape[1]):
-                if idx:
-                    dembs = self.embeddings(outputs)
+                if self.idx_outputs:
+                    dembs = self.dec_embeddings(outputs)
                     temp_mask = y_mask[:,:outputs.shape[1]]
                 else:
                     dembs = outputs
@@ -1131,16 +1166,16 @@ class Transformer(TransformerBase):
                 return preds,latns
             return preds
 
-
     def teacher_force_fwd(self, encs, y, x_mask, y_mask, ret_latns):
         """
         Use this only as an offshoot of the forward function.
         Uses teacher forcing to train the model.
         """
-        if self.idx_outputs is not None and self.idx_outputs:
-            dembs = self.embeddings(y)
+        if self.idx_outputs:
+            dembs = self.dec_embeddings(y)
             if y_mask is None:
-                y_mask = (y==0).masked_fill(y==0,-1e10)
+                bitmask = (y==self.dec_mask_idx)
+                y_mask = bitmask.masked_fill(bitmask,-1e10)
         else:
             dembs = y
         decs = self.decoder(dembs, encs, x_mask=y_mask,
@@ -1152,141 +1187,6 @@ class Transformer(TransformerBase):
         if ret_latns:
             return preds,decs.reshape(len(y),y.shape[1],decs.shape[-1])
         return preds
-
-
-class Transformer(TransformerBase):
-    def __init__(self, *args, **kwargs):
-        """
-        See TransformerBase for arguments
-        """
-        super().__init__(*args, **kwargs)
-        print("enc_slen:", self.enc_slen)
-        print("dec_slen:", self.dec_slen)
-        self.transformer_type = "seq2seq"
-
-        if not self.idx_inputs and not self.idx_outputs:
-            self.embeddings = None
-        elif self.prob_embs: 
-            self.embeddings =nn.Embedding(self.n_vocab,2*self.emb_size)
-        else:
-            self.embeddings = nn.Embedding(self.n_vocab, self.emb_size)
-
-        self.encoder = Encoder(self.enc_slen,emb_size=self.emb_size,
-                                            attn_size=self.attn_size,
-                                            n_layers=self.enc_layers,
-                                            n_heads=self.n_heads,
-                                            use_mask=self.enc_mask,
-                                            act_fxn=self.act_fxn,
-                                            prob_attn=self.prob_attn,
-                                            prob_embs=self.prob_embs)
-
-        self.use_mask = not self.init_decs and self.ordered_preds
-        if self.init_decs:
-            print("init_decs prevented use of mask in decoder")
-        self.decoder = Decoder(self.dec_slen,self.emb_size,
-                                            self.attn_size,
-                                            self.dec_layers,
-                                            n_heads=self.n_heads,
-                                            act_fxn=self.act_fxn,
-                                            use_mask=self.use_mask,
-                                            init_decs=self.init_decs,
-                                            prob_attn=self.prob_attn,
-                                            prob_embs=self.prob_embs)
-
-        self.classifier = Classifier(self.emb_size,
-                                     self.n_vocab,
-                                     h_size=self.class_h_size,
-                                     bnorm=self.class_bnorm,
-                                     drop_p=self.class_drop_p,
-                                     act_fxn=self.act_fxn)
-        self.enc_dropout = nn.Dropout(self.enc_drop_p)
-        self.dec_dropout = nn.Dropout(self.dec_drop_p)
-
-    def forward(self, x, y, x_mask=None, y_mask=None, ret_latns=False):
-        """
-        x: long tensor (B,S) or float tensor (B,S,E)
-            x can take on integer values or float values depending on
-            the self.idx_inputs argument
-        y: float tensor (B,S1)
-        x_mask: float tensor (S,S)
-            defaults to indexes equal to 0 if None is argued
-        y_mask: float tensor (S1,S1)
-            defaults to y indexes equal to 0 if None is argued
-        ret_latns: bool
-            if true, the latent decodings are returned in addition to
-            the classification predictions
-        """
-        if self.embeddings is not None:
-            self.embeddings.weight.data[0,:] = 0 # Mask index
-        if self.idx_inputs is not None and self.idx_inputs:
-            embs = self.embeddings(x)
-            if x_mask is None:
-                bitmask = (x==0)
-                x_mask = bitmask.float().masked_fill(bitmask,-1e10)
-        else:
-            embs = x
-        encs = self.encoder(embs,x_mask=x_mask)
-        encs = self.enc_dropout(encs)
-        # Teacher force
-        if self.training or not self.use_mask:
-            return self.teacher_force_fwd(encs,y,x_mask,y_mask,
-                                                        ret_latns)
-        else:
-            latns = []
-            pred_distr = []
-            outputs = y[:,:1]
-            idx = self.idx_outputs is not None and self.idx_outputs
-            if idx and y_mask is None:
-                y_mask = (y==0).masked_fill(y==0,-1e10)
-            for i in range(y.shape[1]):
-                if idx:
-                    dembs = self.embeddings(outputs)
-                    temp_mask = y_mask[:,:outputs.shape[1]]
-                else:
-                    dembs = outputs
-                    if y_mask is not None:
-                        temp_mask = y_mask[:,:outputs.shape[1]]
-                    else:
-                        temp_mask = y_mask
-                decs = self.decoder(dembs, encs, x_mask=temp_mask,
-                                                 enc_mask=x_mask)
-                decs = decs[:,-1:] # only take the latest element
-                decs = self.dec_dropout(decs)
-                decs = decs.reshape(-1,decs.shape[-1])
-                preds = self.classifier(decs)
-                preds = preds.reshape(len(y),1,preds.shape[-1])
-                pred_distr.append(preds)
-                if idx: argmaxs = torch.argmax(preds,dim=-1)
-                else: argmaxs = decs
-                outputs = torch.cat([outputs,argmaxs],dim=1)
-            preds = torch.cat(pred_distr,dim=1)
-            if ret_latns:
-                latns = decs.reshape(len(y),y.shape[1],decs.shape[-1])
-                return preds,latns
-            return preds
-
-
-    def teacher_force_fwd(self, encs, y, x_mask, y_mask, ret_latns):
-        """
-        Use this only as an offshoot of the forward function.
-        Uses teacher forcing to train the model.
-        """
-        if self.idx_outputs is not None and self.idx_outputs:
-            dembs = self.embeddings(y)
-            if y_mask is None:
-                y_mask = (y==0).masked_fill(y==0,-1e10)
-        else:
-            dembs = y
-        decs = self.decoder(dembs, encs, x_mask=y_mask,
-                                         enc_mask=x_mask)
-        decs = self.dec_dropout(decs)
-        decs = decs.reshape(-1,decs.shape[-1])
-        preds = self.classifier(decs)
-        preds = preds.reshape(len(y),y.shape[1],preds.shape[-1])
-        if ret_latns:
-            return preds,decs.reshape(len(y),y.shape[1],decs.shape[-1])
-        return preds
-
 
 class Classifier(nn.Module):
     def __init__(self, emb_size, n_vocab, h_size, bnorm=True,
