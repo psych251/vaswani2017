@@ -128,4 +128,6 @@ training_scripts/*.csv
 *.pt
 *.pth
 *.p
+data_exploration/*.txt
+data_exploration/*.json
 
