@@ -16,13 +16,13 @@ class EngGerDataset(Dataset):
     """
     Can be english to german or german to english.
     """
-    def __init__(self, data_path, eng_to_ger=True, vocab_size=50000,
+    def __init__(self, data_folder, eng_to_ger=True, vocab_size=50000,
                                                    MASK="<MASK>",
                                                    START="<START>",
                                                    STOP="<STOP>",
                                                    **kwargs):
         """
-        data_path: str
+        data_folder: str
             the path to the folder that should contain a `train.en` and
             a `train.de` file.
         eng_to_ger: bool
@@ -37,9 +37,9 @@ class EngGerDataset(Dataset):
         STOP: str
             the stop token
         """
-        self.data_path = os.path.expanduser(data_path)
-        self.en_path = os.path.join(data_path, "train.en")
-        self.de_path = os.path.join(data_path, "train.de")
+        self.data_folder = os.path.expanduser(data_folder)
+        self.en_path = os.path.join(data_folder, "train.en")
+        self.de_path = os.path.join(data_folder, "train.de")
         self.eng_to_ger = eng_to_ger
         self.MASK = MASK
         self.START = START
