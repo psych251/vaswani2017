@@ -484,3 +484,42 @@ class Multiply(nn.Module):
 
     def forward(self, x):
         return x*self.multiplier
+
+class VaswaniScheduler:
+    """
+    A scheduler that follows the following formula:
+        lr = emb_size**-0.5 * min(step_num**-0.5,
+                                 step_num*warmup_steps**-1.5)
+    """
+    def __init__(self, optimizer, emb_size, warmup_steps=4000):
+        """
+            optimizer: torch optimizer
+            emb_size: int
+                the value used for d_model aka the embedding size
+            warmup_steps: int
+                the number of steps to linearly increase the lr until
+                a change in direction downwards
+        """
+        self.optimizer = optimizer
+        self.emb_size = emb_size
+        self.warmup_steps = warmup_steps
+        self.update_lr(0)
+
+    def get_lr(self, step_num
+        """
+        step_num: int
+            the total number of update steps in the training
+        """
+        lr = self.emb_size**-0.5 * min(step_num**-0.5,
+                                       step_num*self.warmup_steps**-1.5)
+        return lr
+
+    def update_lr(self, step_num):
+        """
+        step_num: int
+            the total number of update steps in the training
+        """
+        lr = self.get_lr(step_num)
+        for g in self.optimizer.param_groups:
+            g['lr'] = lr
+

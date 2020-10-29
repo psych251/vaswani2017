@@ -89,9 +89,7 @@ def train(hyps, verbose=True):
         model.load_state_dict(checkpt["state_dict"])
         optimizer.load_state_dict(checkpt["optim_dict"])
     lossfxn = nn.CrossEntropyLoss()
-    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5,
-                                                    patience=6,
-                                                    verbose=True)
+    scheduler = custmods.VaswaniScheduler(optimizer, hyps['emb_size'])
     if verbose:
         print("Beginning training for {}".format(hyps['save_folder']))
         print("train shape:", (len(train_data),*train_data.X.shape[1:]))
@@ -102,6 +100,8 @@ def train(hyps, verbose=True):
         hyps['n_epochs'] = 2
     epoch = -1
     mask_idx = train_data.Y_mask_idx
+    step_num = 0
+    checkpt_steps = 0
     print()
     while epoch < hyps['n_epochs']:
         epoch += 1
@@ -110,6 +110,8 @@ def train(hyps, verbose=True):
         avg_loss = 0
         avg_acc = 0
         avg_indy_acc = 0
+        checkpt_loss = 0
+        checkpt_acc = 0
         model.train()
         print("Training...")
         optimizer.zero_grad()
@@ -140,6 +142,24 @@ def train(hyps, verbose=True):
             if b % hyps['n_loss_loops'] == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+                step_num += 1
+                scheduler.update_lr(step_num)
+                checkpt_steps = 200
+                if step_num%checkpt_steps==0:
+                    checkpt_steps += 1
+                    save_dict = { "epoch":epoch, "hyps":hyps,
+                             "checkpt_loss":checkpt_loss/checkpt_steps,
+                             "checkpt_acc":checkpt_acc/checkpt_steps,
+                             "state_dict":model.state_dict(),
+                             "optim_dict":optimizer.state_dict(),
+                    }
+                    checkpt_loss = 0; checkpt_acc = 0
+                    save_name = "model_checkpt"
+                    save_name=os.path.join(hyps['save_folder'],save_name)
+                    io.save_checkpt(save_dict,save_name,
+                                              checkpt_steps,
+                                              ext=".pt",
+                                              del_prev_sd=True)
 
             # Acc
             preds = preds.reshape(-1)
@@ -152,6 +172,8 @@ def train(hyps, verbose=True):
             avg_acc += acc.item()
             avg_indy_acc += indy_acc.item()
             avg_loss += loss.item()
+            checkpt_acc += acc.item()
+            checkpt_loss += loss.item()
 
             s = "Loss:{:.5f} | Acc:{:.5f} | {:.0f}%"
             s = s.format(loss.item(), acc.item(),

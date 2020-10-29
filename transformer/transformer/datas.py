@@ -59,6 +59,8 @@ class EngGerDataset(Dataset):
         self.de_tok_path = os.path.join(self.data_folder,"de_tokenizer")
         self.en_arr_path = os.path.join(self.data_folder,"en_bcolz")
         self.de_arr_path = os.path.join(self.data_folder,"de_bcolz")
+        self.en_len_path = os.path.join(self.data_folder,"en_bcolz_lens")
+        self.de_len_path = os.path.join(self.data_folder,"de_bcolz_lens")
 
         # Train tokenizers
         print("Tokenizing english..")
@@ -101,12 +103,13 @@ class EngGerDataset(Dataset):
         print("Making english idxs")
         if os.path.exists(self.en_arr_path):
             print("loading from bcolz", self.en_arr_path)
-            self.en_idxs = bcolz.carray(rootdir=self.en_arr_path,
-                                        dtype=np.int)
+            self.en_idxs = bcolz.carray(rootdir=self.en_arr_path)
+            self.en_lens = bcolz.carray(rootdir=self.en_len_path)
             self.en_max_len = self.en_idxs.shape[-1]
         else:
             self.en_max_len = 0
             self.en_idxs = []
+            self.en_lens = []
             with open(self.en_path, 'r') as f:
                 for i,l in tqdm(enumerate(f.readlines())):
                     l = l.strip()
@@ -115,6 +118,7 @@ class EngGerDataset(Dataset):
                         ids = [self.en_start_idx]+list(output.ids)\
                                                  +[self.en_stop_idx]
                         self.en_idxs.append(ids)
+                        self.en_lens.append(len(ids))
                         if len(ids) > self.en_max_len:
                             self.en_max_len = len(ids)
                     if exp_name == "test" and i > 100:
@@ -130,6 +134,10 @@ class EngGerDataset(Dataset):
                                         rootdir=self.en_arr_path,
                                         dtype="int32")
             self.en_idxs.flush()
+            self.en_lens = bcolz.carray(self.en_lens,
+                                        rootdir=self.en_lens_path,
+                                        dtype="int32")
+            self.en_lens.flush()
         if self.en_max_len > max_context:
             print("Truncating context from", self.en_max_len,
                                        "to", self.max_context)
@@ -140,6 +148,7 @@ class EngGerDataset(Dataset):
         if os.path.exists(self.de_arr_path):
             print("loading from bcolz", self.de_arr_path)
             self.de_idxs = bcolz.carray(rootdir=self.de_arr_path)
+            self.en_lens = bcolz.carray(rootdir=self.en_len_path)
             self.de_max_len = self.de_idxs.shape[-1]
         else:
             self.de_max_len = 0
@@ -152,6 +161,7 @@ class EngGerDataset(Dataset):
                         ids = [self.de_start_idx]+list(output.ids)\
                                                  +[self.de_stop_idx]
                         self.de_idxs.append(ids)
+                        self.de_lens.append(len(ids))
                         if len(ids) > self.de_max_len:
                             self.de_max_len = len(ids)
                     if exp_name == "test" and i > 100:
@@ -166,6 +176,10 @@ class EngGerDataset(Dataset):
                                         rootdir=self.de_arr_path,
                                         dtype="int32")
             self.de_idxs.flush()
+            self.de_lens = bcolz.carray(self.de_lens,
+                                        rootdir=self.de_lens_path,
+                                        dtype="int32")
+            self.de_lens.flush()
         if self.de_max_len > max_context:
             print("Truncating context from", self.de_max_len,
                                        "to", self.max_context)
@@ -173,6 +187,7 @@ class EngGerDataset(Dataset):
 
         if self.eng_to_ger:
             self.X = self.en_idxs
+            self.X_lens = self.en_lens
             self.X_tokenizer = self.en_tokenizer
             self.X_mask_idx = self.en_mask_idx
             self.X_start_idx = self.en_start_idx
@@ -180,6 +195,7 @@ class EngGerDataset(Dataset):
             self.X_max_len = self.en_max_len
 
             self.Y = self.de_idxs
+            self.Y_lens = self.de_lens
             self.Y_tokenizer = self.de_tokenizer
             self.Y_mask_idx = self.de_mask_idx
             self.Y_start_idx = self.de_start_idx
@@ -187,6 +203,7 @@ class EngGerDataset(Dataset):
             self.Y_max_len = self.de_max_len
         else:
             self.X = self.de_idxs
+            self.X_lens = self.de_lens
             self.X_tokenizer = self.de_tokenizer
             self.X_mask_idx = self.de_mask_idx
             self.X_start_idx = self.de_start_idx
@@ -194,6 +211,7 @@ class EngGerDataset(Dataset):
             self.X_max_len = self.de_max_len
 
             self.Y = self.en_idxs
+            self.Y_lens = self.en_lens
             self.Y_tokenizer = self.en_tokenizer
             self.Y_mask_idx = self.en_mask_idx
             self.Y_start_idx = self.en_start_idx
@@ -204,8 +222,24 @@ class EngGerDataset(Dataset):
         return len(self.en_idxs)
     
     def __getitem__(self,i):
-        x = np.asarray(self.X[int(i),:self.X_max_len])
-        y = np.asarray(self.Y[int(i),:self.Y_max_len])
+        l = self.X_lens[i]
+        idxs = []
+        margin = 5
+        while len(idxs)<25:
+            min_l = l-margin
+            max_l = l+margin
+            idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
+            margin += 5
+        max_l = np.max(self.X_lens[idxs])
+        if max_l < 30: batch_size = 64
+        elif max_l < 40: batch_size = 32
+        elif max_l < 50: batch_size = 16
+        else: batch_size = 8
+        assert False
+        # TODO: batch outputs here, adapt training script to accomodate
+        perm = np.random.permutation(len(idxs))
+        x = np.asarray(self.X[int(i),:max_l])
+        y = np.asarray(self.Y[int(i),:max_l])
         return torch.LongTensor(x),torch.LongTensor(y)
 
     def X_idxs2tokens(self, idxs):
