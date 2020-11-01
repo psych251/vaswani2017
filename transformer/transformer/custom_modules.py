@@ -505,7 +505,7 @@ class VaswaniScheduler:
         self.warmup_steps = warmup_steps
         self.update_lr(0)
 
-    def get_lr(self, step_num
+    def get_lr(self, step_num):
         """
         step_num: int
             the total number of update steps in the training
