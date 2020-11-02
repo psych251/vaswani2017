@@ -67,8 +67,8 @@ def train(hyps, verbose=True):
     hyps["dec_mask_idx"] = train_data.Y_tokenizer.token_to_id(MASK)
     hyps['n_vocab'] = train_data.X_tokenizer.get_vocab_size()
     hyps['n_vocab_out'] = train_data.Y_tokenizer.get_vocab_size()
-    train_loader = torch.utils.data.DataLoader(train_data,
-                                    batch_size=hyps['batch_size'],
+    train_loader = VariableLengthSeqLoader(train_data,
+                                    samples_per_epoch=1000,
                                     shuffle=hyps['shuffle'])
     val_loader = torch.utils.data.DataLoader(val_data,
                                     batch_size=hyps['batch_size'])
@@ -144,18 +144,19 @@ def train(hyps, verbose=True):
                 optimizer.zero_grad()
                 step_num += 1
                 scheduler.update_lr(step_num)
-                checkpt_steps = 200
+                checkpt_steps = 75
                 if step_num%checkpt_steps==0:
                     checkpt_steps += 1
                     save_dict = { "epoch":epoch, "hyps":hyps,
-                             "checkpt_loss":checkpt_loss/checkpt_steps,
-                             "checkpt_acc":checkpt_acc/checkpt_steps,
-                             "state_dict":model.state_dict(),
-                             "optim_dict":optimizer.state_dict(),
+                        "checkpt_loss":checkpt_loss/checkpt_steps,
+                        "checkpt_acc":checkpt_acc/checkpt_steps,
+                        "state_dict":model.state_dict(),
+                        "optim_dict":optimizer.state_dict(),
                     }
                     checkpt_loss = 0; checkpt_acc = 0
                     save_name = "model_checkpt"
-                    save_name=os.path.join(hyps['save_folder'],save_name)
+                    save_name=os.path.join(hyps['save_folder'],
+                                           save_name)
                     io.save_checkpt(save_dict,save_name,
                                               checkpt_steps,
                                               ext=".pt",

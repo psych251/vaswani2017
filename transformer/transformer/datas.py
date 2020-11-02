@@ -235,11 +235,9 @@ class EngGerDataset(Dataset):
         elif max_l < 40: batch_size = 32
         elif max_l < 50: batch_size = 16
         else: batch_size = 8
-        assert False
-        # TODO: batch outputs here, adapt training script to accomodate
         perm = np.random.permutation(len(idxs))
-        x = np.asarray(self.X[int(i),:max_l])
-        y = np.asarray(self.Y[int(i),:max_l])
+        x = np.asarray(self.X[perm[:batch_size],:max_l])
+        y = np.asarray(self.Y[perm[:batch_size],:max_l])
         return torch.LongTensor(x),torch.LongTensor(y)
 
     def X_idxs2tokens(self, idxs):
@@ -255,6 +253,35 @@ class EngGerDataset(Dataset):
             converts an array of tokens to a sentence
         """
         return self.Y_tokenizer.decode(idxs)
+
+class VariableLengthSeqLoader:
+    def __init__(self, dataset, samples_per_epoch=1000, shuffle=True,
+                                                        **kwargs):
+        """
+        dataset: torch Dataset
+        samples_per_epoch: int
+        shuffle: bool
+            if true, samples are drawn iid from dataset
+        """
+        self.dataset = dataset
+        self.samples_per_epoch = samples_per_epoch
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        if self.shuffle:
+            self.perm = np.random.permutation(len(self.dataset))
+        else:
+            self.perm = np.arange(self.samples_per_epoch).astype("int")
+        self.perm = self.perm[:self.samples_per_epoch]
+        self.perm_idx = 0
+        return self
+
+    def __next__(self):
+        if self.perm_idx >= self.samples_per_epoch:
+            raise StopIteration
+        i = self.perm[self.perm_idx]
+        self.perm_idx += 1
+        return self.dataset[i]
 
 class DatasetWrapper(Dataset):
     """
