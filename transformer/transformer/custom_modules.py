@@ -503,7 +503,7 @@ class VaswaniScheduler:
         self.optimizer = optimizer
         self.emb_size = emb_size
         self.warmup_steps = warmup_steps
-        self.update_lr(0)
+        self.update_lr(1)
 
     def get_lr(self, step_num):
         """

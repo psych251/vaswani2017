@@ -67,11 +67,12 @@ def train(hyps, verbose=True):
     hyps["dec_mask_idx"] = train_data.Y_tokenizer.token_to_id(MASK)
     hyps['n_vocab'] = train_data.X_tokenizer.get_vocab_size()
     hyps['n_vocab_out'] = train_data.Y_tokenizer.get_vocab_size()
-    train_loader = VariableLengthSeqLoader(train_data,
+    train_loader = datas.VariableLengthSeqLoader(train_data,
                                     samples_per_epoch=1000,
                                     shuffle=hyps['shuffle'])
-    val_loader = torch.utils.data.DataLoader(val_data,
-                                    batch_size=hyps['batch_size'])
+    val_loader = datas.VariableLengthSeqLoader(val_data,
+                                    samples_per_epoch=50,
+                                    shuffle=True)
 
     if verbose:
         print("Making model")
@@ -241,7 +242,6 @@ def train(hyps, verbose=True):
         print()
         val_avg_loss = avg_loss/len(val_loader)
         val_avg_acc = avg_acc/len(val_loader)
-        scheduler.step(val_avg_acc)
         val_avg_indy = avg_indy_acc/len(val_loader)
         stats_string += "Val - Loss:{:.5f} | Acc:{:.5f} | Indy:{:.5f}\n"
         stats_string = stats_string.format(val_avg_loss,val_avg_acc,

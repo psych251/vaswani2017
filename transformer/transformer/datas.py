@@ -59,8 +59,8 @@ class EngGerDataset(Dataset):
         self.de_tok_path = os.path.join(self.data_folder,"de_tokenizer")
         self.en_arr_path = os.path.join(self.data_folder,"en_bcolz")
         self.de_arr_path = os.path.join(self.data_folder,"de_bcolz")
-        self.en_len_path = os.path.join(self.data_folder,"en_bcolz_lens")
-        self.de_len_path = os.path.join(self.data_folder,"de_bcolz_lens")
+        self.en_lens_path = os.path.join(self.data_folder,"en_bcolz_lens")
+        self.de_lens_path = os.path.join(self.data_folder,"de_bcolz_lens")
 
         # Train tokenizers
         print("Tokenizing english..")
@@ -104,7 +104,7 @@ class EngGerDataset(Dataset):
         if os.path.exists(self.en_arr_path):
             print("loading from bcolz", self.en_arr_path)
             self.en_idxs = bcolz.carray(rootdir=self.en_arr_path)
-            self.en_lens = bcolz.carray(rootdir=self.en_len_path)
+            self.en_lens = bcolz.carray(rootdir=self.en_lens_path)
             self.en_max_len = self.en_idxs.shape[-1]
         else:
             self.en_max_len = 0
@@ -148,11 +148,12 @@ class EngGerDataset(Dataset):
         if os.path.exists(self.de_arr_path):
             print("loading from bcolz", self.de_arr_path)
             self.de_idxs = bcolz.carray(rootdir=self.de_arr_path)
-            self.en_lens = bcolz.carray(rootdir=self.en_len_path)
+            self.de_lens = bcolz.carray(rootdir=self.de_lens_path)
             self.de_max_len = self.de_idxs.shape[-1]
         else:
             self.de_max_len = 0
             self.de_idxs = []
+            self.de_lens = []
             with open(self.de_path, 'r') as f:
                 for i,l in tqdm(enumerate(f.readlines())):
                     l = l.strip()
@@ -186,32 +187,32 @@ class EngGerDataset(Dataset):
             self.de_max_len = self.max_context
 
         if self.eng_to_ger:
-            self.X = self.en_idxs
-            self.X_lens = self.en_lens
+            self.X = np.asarray(self.en_idxs)
+            self.X_lens = np.asarray(self.en_lens)
             self.X_tokenizer = self.en_tokenizer
             self.X_mask_idx = self.en_mask_idx
             self.X_start_idx = self.en_start_idx
             self.X_stop_idx = self.en_stop_idx
             self.X_max_len = self.en_max_len
 
-            self.Y = self.de_idxs
-            self.Y_lens = self.de_lens
+            self.Y = np.asarray(self.de_idxs)
+            self.Y_lens = np.asarray(self.de_lens)
             self.Y_tokenizer = self.de_tokenizer
             self.Y_mask_idx = self.de_mask_idx
             self.Y_start_idx = self.de_start_idx
             self.Y_stop_idx = self.de_stop_idx
             self.Y_max_len = self.de_max_len
         else:
-            self.X = self.de_idxs
-            self.X_lens = self.de_lens
+            self.X = np.asarray(self.de_idxs)
+            self.X_lens = np.asarray(self.de_lens)
             self.X_tokenizer = self.de_tokenizer
             self.X_mask_idx = self.de_mask_idx
             self.X_start_idx = self.de_start_idx
             self.X_stop_idx = self.de_stop_idx
             self.X_max_len = self.de_max_len
 
-            self.Y = self.en_idxs
-            self.Y_lens = self.en_lens
+            self.Y = np.asarray(self.en_idxs)
+            self.Y_lens = np.asarray(self.en_lens)
             self.Y_tokenizer = self.en_tokenizer
             self.Y_mask_idx = self.en_mask_idx
             self.Y_start_idx = self.en_start_idx
@@ -222,10 +223,10 @@ class EngGerDataset(Dataset):
         return len(self.en_idxs)
     
     def __getitem__(self,i):
-        l = self.X_lens[i]
+        l = self.X_lens[int(i)]
         idxs = []
         margin = 5
-        while len(idxs)<25:
+        while len(idxs)<25 and margin < 400:
             min_l = l-margin
             max_l = l+margin
             idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
@@ -271,7 +272,8 @@ class VariableLengthSeqLoader:
         if self.shuffle:
             self.perm = np.random.permutation(len(self.dataset))
         else:
-            self.perm = np.arange(self.samples_per_epoch).astype("int")
+            self.perm = np.arange(self.samples_per_epoch)
+        self.perm = self.perm.astype(np.int)
         self.perm = self.perm[:self.samples_per_epoch]
         self.perm_idx = 0
         return self
@@ -282,6 +284,9 @@ class VariableLengthSeqLoader:
         i = self.perm[self.perm_idx]
         self.perm_idx += 1
         return self.dataset[i]
+
+    def __len__(self):
+        return self.samples_per_epoch
 
 class DatasetWrapper(Dataset):
     """
