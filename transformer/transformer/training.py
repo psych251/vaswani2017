@@ -33,12 +33,13 @@ def train(hyps, verbose=True):
     hyps: dict
         contains all relavent hyperparameters
     """
+    test_batch_size = try_key(hyps,"test_batch_size",False)
     hyps['main_path'] = try_key(hyps,'main_path',"./")
     checkpt,hyps = get_resume_checkpt(hyps)
     if checkpt is None:
         hyps['exp_num']=get_exp_num(hyps['main_path'], hyps['exp_name'])
         hyps['save_folder'] = get_save_folder(hyps)
-    if not os.path.exists(hyps['save_folder']):
+    if not os.path.exists(hyps['save_folder']) and not test_batch_size:
         os.mkdir(hyps['save_folder'])
     # Set manual seed
     hyps['seed'] = try_key(hyps,'seed', int(time.time()))
@@ -78,9 +79,11 @@ def train(hyps, verbose=True):
         print("Making model")
     model = getattr(models,model_class)(**hyps)
     if try_key(hyps,"multi_gpu",False):
-        ids = [i for i in range(torch.cuda.device_count())]
-        model = torch.nn.DataParallel(model, device_ids=ids)
-    model.to(DEVICE)
+        DEVICE = torch.device("cuda")
+        model.to(DEVICE)
+        model = torch.nn.DataParallel(model).to(DEVICE)
+    else:
+        model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=hyps['lr'],
                                            weight_decay=hyps['l2'])
     # Load State Dicts if Resuming Training
@@ -95,18 +98,20 @@ def train(hyps, verbose=True):
         print("Beginning training for {}".format(hyps['save_folder']))
         print("train shape:", (len(train_data),*train_data.X.shape[1:]))
         print("val shape:", (len(val_data),*val_data.X.shape[1:]))
-    record_session(hyps,model)
+    if not test_batch_size:
+        record_session(hyps,model)
 
     if hyps['exp_name'] == "test":
         hyps['n_epochs'] = 2
     epoch = -1
     mask_idx = train_data.Y_mask_idx
-    step_num = 0
+    step_num = 0 if checkpt is None else try_key(checkpt,'step_num',0)
     checkpt_steps = 0
     print()
     while epoch < hyps['n_epochs']:
         epoch += 1
-        print("Epoch:{} | Model:{}".format(epoch, hyps['save_folder']))
+        print("Epoch:{} | Step: {} | Model:{}".format(epoch, step_num,
+                                                 hyps['save_folder']))
         starttime = time.time()
         avg_loss = 0
         avg_acc = 0
@@ -117,6 +122,8 @@ def train(hyps, verbose=True):
         print("Training...")
         optimizer.zero_grad()
         for b,(x,y) in enumerate(train_loader):
+            if test_batch_size:
+                x,y = train_loader.get_largest_batch(b)
             torch.cuda.empty_cache()
             targs = y.data[:,1:]
             og_shape = targs.shape
@@ -145,10 +152,10 @@ def train(hyps, verbose=True):
                 optimizer.zero_grad()
                 step_num += 1
                 scheduler.update_lr(step_num)
-                checkpt_steps = 75
-                if step_num%checkpt_steps==0:
+                if step_num%50==0:
                     checkpt_steps += 1
                     save_dict = { "epoch":epoch, "hyps":hyps,
+                        "step_num":step_num,
                         "checkpt_loss":checkpt_loss/checkpt_steps,
                         "checkpt_acc":checkpt_acc/checkpt_steps,
                         "state_dict":model.state_dict(),
@@ -158,10 +165,11 @@ def train(hyps, verbose=True):
                     save_name = "model_checkpt"
                     save_name=os.path.join(hyps['save_folder'],
                                            save_name)
-                    io.save_checkpt(save_dict,save_name,
+                    if not test_batch_size:
+                        io.save_checkpt(save_dict,save_name,
                                               checkpt_steps,
                                               ext=".pt",
-                                              del_prev_sd=True)
+                                              del_prev_sd=False)
 
             # Acc
             preds = preds.reshape(-1)
@@ -189,7 +197,8 @@ def train(hyps, verbose=True):
         train_avg_acc = avg_acc/len(train_loader)
         train_avg_indy = avg_indy_acc/len(train_loader)
 
-        s = "Train - Loss:{:.5f} | Acc:{:.5f} | Indy:{:.5f}\n"
+        s = "Ending Step Count: {}\n".format(step_num)
+        s = s+"Train - Loss:{:.5f} | Acc:{:.5f} | Indy:{:.5f}\n"
         stats_string = s.format(train_avg_loss, train_avg_acc,
                                                 train_avg_indy)
 
@@ -203,6 +212,8 @@ def train(hyps, verbose=True):
         with torch.no_grad():
             rand_word_batch = int(np.random.randint(0,len(val_loader)))
             for b,(x,y) in enumerate(val_loader):
+                if test_batch_size:
+                    x,y = val_loader.get_largest_batch(b)
                 targs = y.data[:,1:]
                 og_shape = targs.shape
                 y = y[:,:-1]
@@ -253,6 +264,7 @@ def train(hyps, verbose=True):
 
         save_dict = {
             "epoch":epoch,
+            "step_num":step_num,
             "hyps":hyps,
             "train_loss":train_avg_loss,
             "train_acc":train_avg_acc,
@@ -265,15 +277,17 @@ def train(hyps, verbose=True):
         }
         save_name = "checkpt"
         save_name = os.path.join(hyps['save_folder'],save_name)
-        io.save_checkpt(save_dict, save_name, epoch, ext=".pt",
+        if not test_batch_size:
+            io.save_checkpt(save_dict, save_name, epoch, ext=".pt",
                                 del_prev_sd=hyps['del_prev_sd'])
         stats_string += "Exec time: {}\n".format(time.time()-starttime)
         print(stats_string)
         s = "Epoch:{} | Model:{}\n".format(epoch, hyps['save_folder'])
         stats_string = s + stats_string
         log_file = os.path.join(hyps['save_folder'],"training_log.txt")
-        with open(log_file,'a') as f:
-            f.write(str(stats_string)+'\n')
+        if not test_batch_size:
+            with open(log_file,'a') as f:
+                f.write(str(stats_string)+'\n')
     del save_dict['state_dict']
     del save_dict['optim_dict']
     del save_dict['hyps']
