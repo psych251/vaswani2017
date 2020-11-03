@@ -25,6 +25,7 @@ class EngGerDataset(Dataset):
                                                    STOP="<STOP>",
                                                    exp_name="",
                                                    max_context=None,
+                                                   batch_size=128,
                                                    **kwargs):
         """
         data_folder: str
@@ -46,6 +47,7 @@ class EngGerDataset(Dataset):
         max_context: int
             the maximum sequence length
         """
+        self.batch_size = batch_size
         self.data_folder = os.path.expanduser(data_folder)
         self.en_path = os.path.join(data_folder, "train.en")
         self.de_path = os.path.join(data_folder, "train.de")
@@ -186,6 +188,7 @@ class EngGerDataset(Dataset):
                                        "to", self.max_context)
             self.de_max_len = self.max_context
 
+        print("Converting to numpy arrays")
         if self.eng_to_ger:
             self.X = np.asarray(self.en_idxs)
             self.X_lens = np.asarray(self.en_lens)
@@ -232,10 +235,50 @@ class EngGerDataset(Dataset):
             idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
             margin += 5
         max_l = np.max(self.X_lens[idxs])
-        if max_l < 30: batch_size = 64
-        elif max_l < 40: batch_size = 32
-        elif max_l < 50: batch_size = 16
+        if max_l < 30: batch_size = self.batch_size
+        elif max_l < 40: batch_size = self.batch_size//2
+        elif max_l < 50: batch_size = self.batch_size//4
+        elif max_l < 70: batch_size = self.batch_size//8
+        else: batch_size = 16
+        batch_size = max(8,batch_size)
+        perm = np.random.permutation(len(idxs))
+        x = np.asarray(self.X[perm[:batch_size],:max_l])
+        y = np.asarray(self.Y[perm[:batch_size],:max_l])
+        return torch.LongTensor(x),torch.LongTensor(y)
+
+    def get_largest_batch(self, size_num):
+        l = 10
+        if size_num == 1:
+            l = 25
+        elif size_num == 2:
+            l = 400
+        elif size_num == 3:
+            l = 45
+        elif size_num == 4:
+            l = 55
+        elif size_num == 5:
+            l = 65
+        elif size_num == 6:
+            l = 85
+        elif size_num == 7:
+            l = 125
+        elif size_num == 8:
+            l = 35
+        idxs = []
+        margin = 5
+        while len(idxs)<32 and margin < 400:
+            min_l = l-margin
+            max_l = l+margin
+            idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
+            margin += 5
+        max_l = np.max(self.X_lens[idxs])
+        if max_l <= 30: batch_size = self.batch_size
+        elif max_l <= 40: batch_size = self.batch_size//2
+        elif max_l <= 50: batch_size = self.batch_size//4
+        elif max_l <= 70: batch_size = self.batch_size//8
+        elif max_l <= 85: batch_size = self.batch_size//16
         else: batch_size = 8
+        batch_size = max(8,batch_size)
         perm = np.random.permutation(len(idxs))
         x = np.asarray(self.X[perm[:batch_size],:max_l])
         y = np.asarray(self.Y[perm[:batch_size],:max_l])
@@ -287,6 +330,9 @@ class VariableLengthSeqLoader:
 
     def __len__(self):
         return self.samples_per_epoch
+
+    def get_largest_batch(self, b):
+        return self.dataset.get_largest_batch(b)
 
 class DatasetWrapper(Dataset):
     """
