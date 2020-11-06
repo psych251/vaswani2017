@@ -34,7 +34,10 @@ def train(hyps, verbose=True):
         contains all relavent hyperparameters
     """
     test_batch_size = try_key(hyps,"test_batch_size",False)
+    if test_batch_size and verbose:
+        print("Testing batch size!! No saving will occur!")
     hyps['main_path'] = try_key(hyps,'main_path',"./")
+    hyps['ignore_keys'] = ["n_epochs", "batch_size", "max_context"]
     checkpt,hyps = get_resume_checkpt(hyps)
     if checkpt is None:
         hyps['exp_num']=get_exp_num(hyps['main_path'], hyps['exp_name'])
@@ -81,18 +84,24 @@ def train(hyps, verbose=True):
     if try_key(hyps,"multi_gpu",False):
         DEVICE = torch.device("cuda")
         model.to(DEVICE)
-        model = torch.nn.DataParallel(model).to(DEVICE)
+        device_ids = list(range(torch.cuda.device_count()))
+        model = torch.nn.DataParallel(model,device_ids=device_ids).cuda()
+        lossfxn = torch.nn.DataParallel(nn.CrossEntropyLoss(),
+                                        device_ids=device_ids).cuda()
     else:
         model.to(DEVICE)
+        lossfxn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=hyps['lr'],
                                            weight_decay=hyps['l2'])
     # Load State Dicts if Resuming Training
     if checkpt is not None:
         if verbose:
-            print("Loading state dicts from", checkpt['save_folder'])
+            print("Loading state dicts from", hyps['save_folder'])
         model.load_state_dict(checkpt["state_dict"])
         optimizer.load_state_dict(checkpt["optim_dict"])
-    lossfxn = nn.CrossEntropyLoss()
+        epoch = checkpt['epoch']1
+    else:
+        epoch = -1
     scheduler = custmods.VaswaniScheduler(optimizer, hyps['emb_size'])
     if verbose:
         print("Beginning training for {}".format(hyps['save_folder']))
@@ -103,7 +112,6 @@ def train(hyps, verbose=True):
 
     if hyps['exp_name'] == "test":
         hyps['n_epochs'] = 2
-    epoch = -1
     mask_idx = train_data.Y_mask_idx
     step_num = 0 if checkpt is None else try_key(checkpt,'step_num',0)
     checkpt_steps = 0
@@ -132,9 +140,9 @@ def train(hyps, verbose=True):
             preds = torch.argmax(logits,dim=-1)
 
             if epoch % 3 == 0 and b == 0:
-                inp = x[0].data.cpu().numpy()
-                trg = targs[0].data.numpy()
-                prd = preds[0].data.cpu().numpy()
+                inp = x.data[0].cpu().numpy()
+                trg = targs.data[0].numpy()
+                prd = preds.data[0].cpu().numpy()
                 print("Inp:", train_data.X_idxs2tokens(inp))
                 print("Targ:", train_data.Y_idxs2tokens(trg))
                 print("Pred:", train_data.Y_idxs2tokens(prd))
@@ -143,7 +151,7 @@ def train(hyps, verbose=True):
             logits = logits.reshape(-1,logits.shape[-1])
             targs = targs.reshape(-1).to(DEVICE)
             bitmask = targs!=mask_idx
-            loss = lossfxn(logits[bitmask],targs[bitmask])
+            loss = lossfxn(logits[bitmask],targs[bitmask]).mean()
 
             loss = loss/hyps['n_loss_loops']
             loss.backward()
@@ -171,19 +179,20 @@ def train(hyps, verbose=True):
                                               ext=".pt",
                                               del_prev_sd=False)
 
-            # Acc
-            preds = preds.reshape(-1)
-            sl = og_shape[-1]
-            eq = (preds==targs).float()
-            indy_acc = eq[bitmask].mean()
-            eq[~bitmask] = 1
-            eq = eq.reshape(og_shape)
-            acc = (eq.sum(-1)==sl).float().mean()
-            avg_acc += acc.item()
-            avg_indy_acc += indy_acc.item()
-            avg_loss += loss.item()
-            checkpt_acc += acc.item()
-            checkpt_loss += loss.item()
+            with torch.no_grad():
+                # Acc
+                preds = preds.reshape(-1)
+                sl = og_shape[-1]
+                eq = (preds==targs).float()
+                indy_acc = eq[bitmask].mean()
+                eq[~bitmask] = 1
+                eq = eq.reshape(og_shape)
+                acc = (eq.sum(-1)==sl).float().mean()
+                avg_acc += acc.item()
+                avg_indy_acc += indy_acc.item()
+                avg_loss += loss.item()
+                checkpt_acc += acc.item()
+                checkpt_loss += loss.item()
 
             s = "Loss:{:.5f} | Acc:{:.5f} | {:.0f}%"
             s = s.format(loss.item(), acc.item(),
