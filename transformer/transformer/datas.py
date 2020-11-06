@@ -225,8 +225,9 @@ class EngGerDataset(Dataset):
     def __len__(self):
         return len(self.en_idxs)
     
-    def __getitem__(self,i):
-        l = self.X_lens[int(i)]
+    def __getitem__(self,i,l=None):
+        if l is None:
+            l = self.X_lens[int(i)]
         idxs = []
         margin = 5
         while len(idxs)<25 and margin < 400:
@@ -234,17 +235,19 @@ class EngGerDataset(Dataset):
             max_l = l+margin
             idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
             margin += 5
-        max_l = np.max(self.X_lens[idxs])
-        if max_l < 30: batch_size = self.batch_size
-        elif max_l < 40: batch_size = self.batch_size//2
-        elif max_l < 50: batch_size = self.batch_size//4
-        elif max_l < 70: batch_size = self.batch_size//8
-        else: batch_size = 16
-        batch_size = max(8,batch_size)
+        max_l = min(np.max(self.X_lens[idxs]),self.max_context)
+        if max_l <   50 : batch_size = self.batch_size
+        elif max_l < 70: batch_size = self.batch_size//2
+        elif max_l < 100: batch_size = self.batch_size//4
+        elif max_l < 120: batch_size = self.batch_size//8
+        elif max_l < 140: batch_size = self.batch_size//16
+        elif max_l < 160: batch_size = self.batch_size//32
+        else: batch_size = self.batch_size//64
+        batch_size = max(16,batch_size)
         perm = np.random.permutation(len(idxs))
         x = np.asarray(self.X[perm[:batch_size],:max_l])
         y = np.asarray(self.Y[perm[:batch_size],:max_l])
-        return torch.LongTensor(x),torch.LongTensor(y)
+        return torch.LongTensor(x), torch.LongTensor(y)
 
     def get_largest_batch(self, size_num):
         l = 10
@@ -253,36 +256,18 @@ class EngGerDataset(Dataset):
         elif size_num == 2:
             l = 400
         elif size_num == 3:
-            l = 45
+            l = 130
         elif size_num == 4:
-            l = 55
+            l = 75
         elif size_num == 5:
-            l = 65
+            l = 44
         elif size_num == 6:
-            l = 85
+            l = 94
         elif size_num == 7:
-            l = 125
+            l = 200
         elif size_num == 8:
-            l = 35
-        idxs = []
-        margin = 5
-        while len(idxs)<32 and margin < 400:
-            min_l = l-margin
-            max_l = l+margin
-            idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
-            margin += 5
-        max_l = np.max(self.X_lens[idxs])
-        if max_l <= 30: batch_size = self.batch_size
-        elif max_l <= 40: batch_size = self.batch_size//2
-        elif max_l <= 50: batch_size = self.batch_size//4
-        elif max_l <= 70: batch_size = self.batch_size//8
-        elif max_l <= 85: batch_size = self.batch_size//16
-        else: batch_size = 8
-        batch_size = max(8,batch_size)
-        perm = np.random.permutation(len(idxs))
-        x = np.asarray(self.X[perm[:batch_size],:max_l])
-        y = np.asarray(self.Y[perm[:batch_size],:max_l])
-        return torch.LongTensor(x),torch.LongTensor(y)
+            l = 300
+        return self.__getitem__(0,l)
 
     def X_idxs2tokens(self, idxs):
         """
