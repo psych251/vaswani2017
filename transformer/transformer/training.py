@@ -81,12 +81,14 @@ def train(hyps, verbose=True):
     if verbose:
         print("Making model")
     model = getattr(models,model_class)(**hyps)
-    if try_key(hyps,"multi_gpu",False):
+    multi_gpu = try_key(hyps,"multi_gpu",False)
+    if multi_gpu:
         DEVICE = torch.device("cuda")
         model.to(DEVICE)
         device_ids = list(range(torch.cuda.device_count()))
         model = torch.nn.DataParallel(model,device_ids=device_ids).cuda()
-        lossfxn = torch.nn.DataParallel(nn.CrossEntropyLoss(),
+        lossfxn = custmods.LossWrapper(nn.CrossEntropyLoss())
+        lossfxn = torch.nn.DataParallel(lossfxn,
                                         device_ids=device_ids).cuda()
     else:
         model.to(DEVICE)
@@ -99,7 +101,7 @@ def train(hyps, verbose=True):
             print("Loading state dicts from", hyps['save_folder'])
         model.load_state_dict(checkpt["state_dict"])
         optimizer.load_state_dict(checkpt["optim_dict"])
-        epoch = checkpt['epoch']1
+        epoch = checkpt['epoch']
     else:
         epoch = -1
     scheduler = custmods.VaswaniScheduler(optimizer, hyps['emb_size'])
@@ -151,7 +153,9 @@ def train(hyps, verbose=True):
             logits = logits.reshape(-1,logits.shape[-1])
             targs = targs.reshape(-1).to(DEVICE)
             bitmask = targs!=mask_idx
-            loss = lossfxn(logits[bitmask],targs[bitmask]).mean()
+            loss = lossfxn(logits[bitmask],targs[bitmask])
+            if multi_gpu:
+                loss = loss.mean()
 
             loss = loss/hyps['n_loss_loops']
             loss.backward()
@@ -233,13 +237,24 @@ def train(hyps, verbose=True):
                 targs = targs.reshape(-1).to(DEVICE)
                 bitmask = targs!=mask_idx
                 loss = lossfxn(preds[bitmask],targs[bitmask])
+                if multi_gpu:
+                    loss = loss.mean()
                 preds = torch.argmax(preds,dim=-1)
-                sl = og_shape[-1]
+                sl = int(og_shape[-1])
                 eq = (preds==targs).float()
                 indy_acc = eq[bitmask].mean()
                 eq[~bitmask] = 1
-                eq = eq.reshape(og_shape)
-                acc = (eq.sum(-1)==sl).float().mean()
+                try:
+                    eq = eq.reshape(og_shape)
+                    acc = (eq.sum(-1)==sl).float().mean()
+                except Exception as e:
+                    print("exception:", e)
+                    print("eq:", eq.shape)
+                    print("sl:", sl)
+                    print("eqsum:", eq.sum(-1))
+                    print("==:", (eq.sum(-1)==sl))
+                    print("float", (eq.sum(-1)==sl).float())
+                    print("mean", (eq.sum(-1)==sl).float())
                 avg_acc += acc.item()
                 avg_indy_acc += indy_acc.item()
                 avg_loss += loss.item()

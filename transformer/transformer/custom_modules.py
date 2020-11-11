@@ -523,3 +523,14 @@ class VaswaniScheduler:
         for g in self.optimizer.param_groups:
             g['lr'] = lr
 
+class LossWrapper(nn.Module):
+    """
+    This wrapper simply returns the loss as a tensor rather than a
+    scalar so that it can be used with DataParallel
+    """
+    def __init__(self, lossfxn):
+        super().__init__()
+        self.lossfxn = lossfxn
+
+    def forward(self, inpts, targs):
+        return self.lossfxn(inpts, targs)[None]
