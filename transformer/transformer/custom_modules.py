@@ -217,9 +217,9 @@ class EncodingBlock(nn.Module):
         """
         x = self.norm0(x)
         fx = self.multi_attn(q=x,k=x,v=x,mask=mask)
-        fx = self.norm1(fx+x)
-        fx = self.fwd_net(fx)
-        fx = fx+self.norm2(fx+x)
+        x = self.norm1(fx+x)
+        fx = self.fwd_net(x)
+        fx = self.norm2(fx+x)
         if self.prob_embs:
             fx = self.proj(fx)
         return fx
@@ -295,12 +295,12 @@ class DecodingBlock(nn.Module):
         fx = self.multi_attn1(q=x,k=x,v=x,mask=mask,
                                           q_mask=x_mask,
                                           k_mask=x_mask)
-        fx = self.norm1(fx+x)
-        fx = self.multi_attn2(q=fx,k=encs,v=encs, mask=None,
-                                                  q_mask=x_mask,
-                                                  k_mask=enc_mask)
-        fx = self.norm2(fx+x)
-        fx = self.fwd_net(fx)
+        x = self.norm1(fx+x)
+        fx = self.multi_attn2(q=x,k=encs,v=encs, mask=None,
+                                                 q_mask=x_mask,
+                                                 k_mask=enc_mask)
+        x = self.norm2(fx+x)
+        fx = self.fwd_net(x)
         fx = self.norm3(fx+x)
         if self.prob_embs:
             fx = self.proj(fx)
@@ -372,8 +372,8 @@ class GencodingBlock(nn.Module):
         fx = self.multi_attn2(q=x,k=encs,v=encs,mask=mask,
                                                 q_mask=x_mask,
                                                 k_mask=enc_mask)
-        fx = self.norm2(fx+x)
-        fx = self.fwd_net(fx)
+        x = self.norm2(fx+x)
+        fx = self.fwd_net(x)
         fx = self.norm3(fx+x)
         if self.prob_embs:
             fx = self.proj(fx)
