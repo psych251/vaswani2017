@@ -1,15 +1,19 @@
 {
-    "exp_name":"firstrun",
+    "exp_name":"vocabsize",
+    "resume_folder":"",
     "save_root":"/data2/pdplab/grantsrb/transformer",
     "description":"",
     "del_prev_sd":true,
     "seed":0,
+    "n_nodes":1,
+    "node_rank":0,
     "multi_gpu":true,
 
     "dataset":"EngGerDataset",
     "data_folder":"/data2/pdplab/grantsrb/wmt_data/en-de_2014/",
     "eng_to_ger":true,
     "shuffle":true,
+    "vocab_size":37000,
 
     "model_class":"Transformer",
     "use_dec_embs":true,
@@ -21,12 +25,12 @@
     "enc_slen":null,
     "dec_slen":null,
 
-    "emb_size":100,
-    "class_h_size":2000,
+    "emb_size":512,
+    "class_h_size":2048,
     "attn_size":64,
     "n_heads":8,
-    "enc_layers":8,
-    "dec_layers":8,
+    "enc_layers":6,
+    "dec_layers":6,
     "ordered_preds":true,
     "enc_mask":false,
     "class_bnorm":true,
@@ -39,6 +43,9 @@
     "enc_drop_p":0,
     "dec_drop_p":0,
     "n_epochs":200,
-    "batch_size":32,
-    "n_loss_loops":4
+    "batch_size":128,
+    "max_context":128,
+    "n_loss_loops":1,
+
+    "test_batch_size":false
 }
