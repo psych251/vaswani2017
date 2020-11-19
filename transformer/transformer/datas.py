@@ -14,20 +14,36 @@ import skimage.io
 from transformer.utils import get_max_key
 from tokenizers import CharBPETokenizer
 import ml_utils.datas
+import contextlib
+import time
 
 class EngGerDataset(Dataset):
     """
     Can be english to german or german to english.
     """
-    def __init__(self, data_folder, eng_to_ger=True, vocab_size=50000,
-                                                   MASK="<MASK>",
-                                                   START="<START>",
-                                                   STOP="<STOP>",
-                                                   exp_name="",
-                                                   max_context=None,
-                                                   batch_size=128,
-                                                   **kwargs):
+    def __init__(self, data_folder, rank=0,
+                                    val_set=False,
+                                    world_size=1,
+                                    seed=0,
+                                    eng_to_ger=True,
+                                    vocab_size=37000,
+                                    MASK="<MASK>",
+                                    START="<START>",
+                                    STOP="<STOP>",
+                                    exp_name="",
+                                    max_context=None,
+                                    batch_size=128,
+                                    val_size=30000,
+                                    **kwargs):
         """
+        rank: int
+            the rank in the distributed training
+        val_set: bool
+            if true, this dataset is created as the validation set
+        world_size: int
+            the number of processes if using distributed training
+        seed: int
+            random seed
         data_folder: str
             the path to the folder that should contain a `train.en` and
             a `train.de` file.
@@ -46,7 +62,14 @@ class EngGerDataset(Dataset):
             name of the experiment
         max_context: int
             the maximum sequence length
+        val_size: int
+            the number of samples to be set aside for validation
         """
+        self.rank = rank
+        print("rank:", self.rank)
+        self.world_size = world_size
+        self.val_set = val_set
+        self.val_size = val_size
         self.batch_size = batch_size
         self.data_folder = os.path.expanduser(data_folder)
         self.en_path = os.path.join(data_folder, "train.en")
@@ -65,10 +88,12 @@ class EngGerDataset(Dataset):
         self.de_lens_path = os.path.join(self.data_folder,"de_bcolz_lens")
 
         # Train tokenizers
-        print("Tokenizing english..")
+        if rank==0: print("Tokenizing english..")
         self.en_tokenizer = CharBPETokenizer()
         if os.path.exists(self.en_tok_path): # Load trained tokenizer
-            print("loading from pretrained tokenizer", self.en_tok_path)
+            if rank==0:
+                print("loading from pretrained tokenizer",
+                                         self.en_tok_path)
             self.en_tokenizer = ml_utils.datas.load_tokenizer(
                                                self.en_tokenizer,
                                                self.en_tok_path)
@@ -83,10 +108,12 @@ class EngGerDataset(Dataset):
         self.en_start_idx = self.en_tokenizer.token_to_id(self.START)
         self.en_stop_idx = self.en_tokenizer.token_to_id(self.STOP)
 
-        print("Tokenizing german..")
+        if rank==0: print("Tokenizing german..")
         self.de_tokenizer = CharBPETokenizer()
         if os.path.exists(self.de_tok_path): # Load trained tokenizer
-            print("loading from pretrained tokenizer", self.de_tok_path)
+            if rank==0:
+                print("loading from pretrained tokenizer",
+                                         self.de_tok_path)
             self.de_tokenizer = ml_utils.datas.load_tokenizer(
                                                self.de_tokenizer,
                                                self.de_tok_path)
@@ -102,12 +129,45 @@ class EngGerDataset(Dataset):
         self.de_stop_idx = self.de_tokenizer.token_to_id(self.STOP)
 
         # Get English sentence lists
-        print("Making english idxs")
+        if rank==0: print("Making english idxs")
         if os.path.exists(self.en_arr_path):
-            print("loading from bcolz", self.en_arr_path)
+            if rank==0: print("loading from bcolz", self.en_arr_path)
             self.en_idxs = bcolz.carray(rootdir=self.en_arr_path)
             self.en_lens = bcolz.carray(rootdir=self.en_lens_path)
             self.en_max_len = self.en_idxs.shape[-1]
+            if exp_name == "test":
+                self.val_size = 250
+                self.en_idxs = self.en_idxs[:1000]
+                self.en_lens = self.en_lens[:1000]
+            if self.world_size > 1:
+                with temp_seed(seed-rank): 
+                    sample_perm=np.random.permutation(len(self.en_idxs))
+                if not self.val_set:
+                    n_samps = (len(self.en_idxs)-self.val_size)
+                    n_samps = n_samps//self.world_size
+                    indices = sample_perm[rank*n_samps:(rank+1)*n_samps]
+                else:
+                    indices = sample_perm[-self.val_size:]
+                try:
+                    if rank==0:
+                        print("splitting dataset.. ",end="")
+                        starttime = time.time()
+                    self.en_idxs = self.en_idxs[indices]
+                    self.en_lens = self.en_lens[indices]
+                    if rank==0: print("duration:", time.time()-starttime)
+                except:
+                    temp_idxs = []
+                    temp_lens = []
+                    if rank==0:
+                        print("Collecting data")
+                        rnge = tqdm(indices)
+                    else: rnge = indices
+                    for i in rnge:
+                        temp_idxs.append(self.en_idxs[i])
+                        temp_lens.append(self.en_lens[i])
+                    self.en_idxs = np.asarray(temp_idxs)
+                    self.en_lens = np.asarray(temp_lens)
+                    if rank==0: print("duration:", time.time()-starttime)
         else:
             self.en_max_len = 0
             self.en_idxs = []
@@ -127,11 +187,11 @@ class EngGerDataset(Dataset):
                         break
             mask = [self.en_mask_idx for i in range(self.en_max_len)]
             l = 0
-            print("Padding english idxs")
+            if rank==0: print("Padding english idxs")
             for i in tqdm(range(len(self.en_idxs))):
                 diff = self.en_max_len - len(self.en_idxs[i])
                 self.en_idxs[i] = self.en_idxs[i] + mask[:diff]
-            print("Saving to bcolz")
+            if rank==0: print("Saving to bcolz")
             self.en_idxs = bcolz.carray(self.en_idxs,
                                         rootdir=self.en_arr_path,
                                         dtype="int32")
@@ -141,17 +201,46 @@ class EngGerDataset(Dataset):
                                         dtype="int32")
             self.en_lens.flush()
         if self.en_max_len > max_context:
-            print("Truncating context from", self.en_max_len,
-                                       "to", self.max_context)
+            if rank==0:
+                print("Truncating context from", self.en_max_len,
+                                          "to", self.max_context)
             self.en_max_len = self.max_context
 
         # Get German Sentence Lists
-        print("Making german idxs")
+        if rank==0: print("Making german idxs")
         if os.path.exists(self.de_arr_path):
-            print("loading from bcolz", self.de_arr_path)
+            if rank==0: print("loading from bcolz", self.de_arr_path)
             self.de_idxs = bcolz.carray(rootdir=self.de_arr_path)
             self.de_lens = bcolz.carray(rootdir=self.de_lens_path)
             self.de_max_len = self.de_idxs.shape[-1]
+            if exp_name == "test":
+                self.val_size = 250
+                self.en_idxs = self.en_idxs[:1000]
+                self.en_lens = self.en_lens[:1000]
+            if self.world_size > 1:
+                try:
+                    if rank==0:
+                        print("splitting dataset.. ",end="")
+                        starttime = time.time()
+                    self.de_idxs = self.de_idxs[indices]
+                    self.de_lens = self.de_lens[indices]
+                    if rank==0: print("duration:", time.time()-starttime)
+                except:
+                    temp_idxs = []
+                    temp_lens = []
+                    try:
+                        if rank==0: print("Collecting data")
+                        for i in rnge:
+                            temp_idxs.append(self.de_idxs[i])
+                            temp_lens.append(self.de_lens[i])
+                    except Exception as e:
+                        print("Likely error caused by bcolz existing "+\
+                                               "for en but not de data")
+                        print(e)
+                        assert False
+                    self.de_idxs = np.asarray(temp_idxs)
+                    self.de_lens = np.asarray(temp_lens)
+                    if rank==0: print("duration:", time.time()-starttime)
         else:
             self.de_max_len = 0
             self.de_idxs = []
@@ -170,11 +259,11 @@ class EngGerDataset(Dataset):
                     if exp_name == "test" and i > 100:
                         break
             mask = [self.de_mask_idx for i in range(self.de_max_len)]
-            print("Padding german idxs")
+            if rank==0: print("Padding german idxs")
             for i in tqdm(range(len(self.de_idxs))):
                 diff = self.de_max_len - len(self.de_idxs[i])
                 self.de_idxs[i] = self.de_idxs[i] + mask[:diff]
-            print("Saving to bcolz")
+            if rank==0: print("Saving to bcolz")
             self.de_idxs = bcolz.carray(self.de_idxs,
                                         rootdir=self.de_arr_path,
                                         dtype="int32")
@@ -184,11 +273,12 @@ class EngGerDataset(Dataset):
                                         dtype="int32")
             self.de_lens.flush()
         if self.de_max_len > max_context:
-            print("Truncating context from", self.de_max_len,
+            if rank==0:
+                print("Truncating context from", self.de_max_len,
                                        "to", self.max_context)
             self.de_max_len = self.max_context
 
-        print("Converting to numpy arrays")
+        if rank==0: print("Converting to numpy arrays")
         if self.eng_to_ger:
             self.X = np.asarray(self.en_idxs)
             self.X_lens = np.asarray(self.en_lens)
@@ -348,13 +438,19 @@ class DatasetWrapper(Dataset):
         idx = self.idxs[idx]
         return self.dataset[idx]
 
-def get_data(dataset, shuffle=True, **kwargs):
-    dataset = globals()[dataset](**kwargs)
-    if shuffle: perm = torch.randperm(len(dataset))
-    else: perm = torch.arange(len(dataset))
-    n_val = int(min(.2*len(dataset), 30000))
-    val_idxs = perm[:n_val]
-    train_idxs = perm[n_val:]
-    val_data = DatasetWrapper(dataset, val_idxs)
-    train_data = DatasetWrapper(dataset, train_idxs)
+def get_data(hyps):
+    dataset = hyps['dataset']
+    train_data = globals()[dataset](**hyps)
+    val_data = None
+    if hyps['rank']==0:
+        val_data = globals()[dataset](val_set=True,**hyps)
     return train_data,val_data
+
+@contextlib.contextmanager
+def temp_seed(seed):
+    state = np.random.get_state()
+    np.random.seed(seed)
+    try:
+        yield
+    finally:
+        np.random.set_state(state)

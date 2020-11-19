@@ -112,7 +112,7 @@ class Encoder(ECoderBase):
         # Resize mask in case x is of unusual sequence length
         if self.mask is not None and x.shape[1] != self.mask.shape[0]:
             mask = self.get_mask(x.shape[1])
-            mask = mask.to(DEVICE_DICT[x.get_device()])
+            mask = mask.cuda(non_blocking=True)
             self.register_buffer("mask",mask)
         else:
             mask = self.mask
@@ -560,7 +560,7 @@ class AppendEncoder(ECoderBase):
         """
         if x.shape[1] != self.seq_len:
             mask = self.get_mask(x.shape[1], self.state_size)
-            mask = mask.to(DEVICE_DICT[x.get_device()])
+            mask = mask.cuda(non_blocking=True)
             self.register_buffer("mask",mask)
         else:
             mask = self.mask

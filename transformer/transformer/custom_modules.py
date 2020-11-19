@@ -5,13 +5,6 @@ import torch.nn.functional as F
 import numpy as np
 from transformer.utils import sample_probs
 
-d = {i:"cuda:"+str(i) for i in range(torch.cuda.device_count())}
-DEVICE_DICT = {-1:"cpu", **d}
-
-if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:0")
-else:
-    DEVICE = torch.device("cpu")
 
 class PositionalEncoder(nn.Module):
     def __init__(self, seq_len, emb_size):
@@ -37,7 +30,7 @@ class PositionalEncoder(nn.Module):
         except:
             print("Increasing length of positional encoding")
             pos_enc = self.get_pos_encoding(x.shape[1],self.emb_size)
-            pos_enc = pos_enc.to(DEVICE_DICT[x.get_device()])
+            pos_enc = pos_enc.cuda(non_blocking=True)
             fx = pos_enc[:x.shape[1]] + x
             self.register_buffer('pos_enc',pos_enc)
             return fx

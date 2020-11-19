@@ -18,34 +18,52 @@ import transformer.models as models
 import ml_utils.save_io as io
 from ml_utils.training import get_exp_num, record_session, get_save_folder,get_resume_checkpt
 from ml_utils.utils import try_key
+import torch.distributed as dist
+from apex.parallel import DistributedDataParallel as DDP
+from apex import amp
+from nltk.translate.bleu_score import corpus_bleu
 
-if torch.cuda.is_available():
-    DEVICE = torch.device("cuda:0")
-else:
-    DEVICE = torch.device("cpu")
 
 MASK  = "<MASK>"
 START = "<START>"
 STOP  = "<STOP>"
 
-def train(hyps, verbose=True):
+def train(gpu, hyps, verbose=True):
     """
+    gpu: int
+        the gpu for this training process
     hyps: dict
         contains all relavent hyperparameters
     """
+    rank = 0
+    if hyps['multi_gpu']:
+        rank = hyps['n_gpus']*hyps['node_rank'] + gpu
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=hyps['world_size'],
+            rank=rank)
+    verbose = verbose and rank==0
+    hyps['rank'] = rank
+
+    torch.cuda.set_device(gpu)
     test_batch_size = try_key(hyps,"test_batch_size",False)
     if test_batch_size and verbose:
         print("Testing batch size!! No saving will occur!")
     hyps['main_path'] = try_key(hyps,'main_path',"./")
-    hyps['ignore_keys'] = ["n_epochs", "batch_size", "max_context"]
+    if "ignore_keys" not in hyps:
+        hyps['ignore_keys'] = ["n_epochs", "batch_size",
+                                "max_context","rank", "n_loss_loops"]
     checkpt,hyps = get_resume_checkpt(hyps)
-    if checkpt is None:
+    if checkpt is None and rank==0:
         hyps['exp_num']=get_exp_num(hyps['main_path'], hyps['exp_name'])
         hyps['save_folder'] = get_save_folder(hyps)
-    if not os.path.exists(hyps['save_folder']) and not test_batch_size:
+    if rank>0: hyps['save_folder'] = "placeholder"
+    if not os.path.exists(hyps['save_folder']) and\
+                    not test_batch_size and rank==0:
         os.mkdir(hyps['save_folder'])
     # Set manual seed
-    hyps['seed'] = try_key(hyps,'seed', int(time.time()))
+    hyps['seed'] = try_key(hyps, 'seed', int(time.time()))+rank
     torch.manual_seed(hyps['seed'])
     np.random.seed(hyps['seed'])
     hyps['MASK'] = MASK
@@ -54,7 +72,7 @@ def train(hyps, verbose=True):
 
     model_class = hyps['model_class']
     hyps['n_loss_loops'] = try_key(hyps,'n_loss_loops',1)
-    if not hyps['init_decs'] and not hyps['ordered_preds']:
+    if not hyps['init_decs'] and not hyps['ordered_preds'] and verbose:
         s = "WARNING!! You probably want to set ordered preds to True "
         s += "with your current configuration!!"
         print(s)
@@ -63,7 +81,7 @@ def train(hyps, verbose=True):
         print("Retreiving Dataset")
     if "shuffle_split" not in hyps and hyps['shuffle']:
         hyps['shuffle_split'] = True
-    train_data,val_data = datas.get_data(**hyps)
+    train_data,val_data = datas.get_data(hyps)
 
     hyps['enc_slen'] = train_data.X.shape[-1]
     hyps['dec_slen'] = train_data.Y.shape[-1]
@@ -71,6 +89,7 @@ def train(hyps, verbose=True):
     hyps["dec_mask_idx"] = train_data.Y_tokenizer.token_to_id(MASK)
     hyps['n_vocab'] = train_data.X_tokenizer.get_vocab_size()
     hyps['n_vocab_out'] = train_data.Y_tokenizer.get_vocab_size()
+
     train_loader = datas.VariableLengthSeqLoader(train_data,
                                     samples_per_epoch=1000,
                                     shuffle=hyps['shuffle'])
@@ -81,20 +100,14 @@ def train(hyps, verbose=True):
     if verbose:
         print("Making model")
     model = getattr(models,model_class)(**hyps)
-    multi_gpu = try_key(hyps,"multi_gpu",False)
-    if multi_gpu:
-        DEVICE = torch.device("cuda")
-        model.to(DEVICE)
-        device_ids = list(range(torch.cuda.device_count()))
-        model = torch.nn.DataParallel(model,device_ids=device_ids).cuda()
-        lossfxn = custmods.LossWrapper(nn.CrossEntropyLoss())
-        lossfxn = torch.nn.DataParallel(lossfxn,
-                                        device_ids=device_ids).cuda()
-    else:
-        model.to(DEVICE)
-        lossfxn = nn.CrossEntropyLoss()
+    model.cuda(gpu)
+    lossfxn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=hyps['lr'],
                                            weight_decay=hyps['l2'])
+    if hyps['multi_gpu']:
+        model, optimizer = amp.initialize(model, optimizer,
+                                          opt_level='O0')
+        model = DDP(model)
     # Load State Dicts if Resuming Training
     if checkpt is not None:
         if verbose:
@@ -102,6 +115,8 @@ def train(hyps, verbose=True):
         model.load_state_dict(checkpt["state_dict"])
         optimizer.load_state_dict(checkpt["optim_dict"])
         epoch = checkpt['epoch']
+        if hyps['multi_gpu'] and "amp_dict" in checkpt:
+            amp.load_state_dict(checkpt['amp_dict'])
     else:
         epoch = -1
     scheduler = custmods.VaswaniScheduler(optimizer, hyps['emb_size'])
@@ -117,11 +132,14 @@ def train(hyps, verbose=True):
     mask_idx = train_data.Y_mask_idx
     step_num = 0 if checkpt is None else try_key(checkpt,'step_num',0)
     checkpt_steps = 0
-    print()
+    if verbose: print()
     while epoch < hyps['n_epochs']:
         epoch += 1
-        print("Epoch:{} | Step: {} | Model:{}".format(epoch, step_num,
+        if verbose:
+            print("Epoch:{} | Step: {} | Model:{}".format(epoch,
+                                                 step_num,
                                                  hyps['save_folder']))
+            print("Training...")
         starttime = time.time()
         avg_loss = 0
         avg_acc = 0
@@ -129,7 +147,6 @@ def train(hyps, verbose=True):
         checkpt_loss = 0
         checkpt_acc = 0
         model.train()
-        print("Training...")
         optimizer.zero_grad()
         for b,(x,y) in enumerate(train_loader):
             if test_batch_size:
@@ -138,10 +155,11 @@ def train(hyps, verbose=True):
             targs = y.data[:,1:]
             og_shape = targs.shape
             y = y[:,:-1]
-            logits = model(x.to(DEVICE), y.to(DEVICE))
+            logits = model(x.cuda(non_blocking=True),
+                           y.cuda(non_blocking=True))
             preds = torch.argmax(logits,dim=-1)
 
-            if epoch % 3 == 0 and b == 0:
+            if epoch % 3 == 0 and b == 0 and verbose:
                 inp = x.data[0].cpu().numpy()
                 trg = targs.data[0].numpy()
                 prd = preds.data[0].cpu().numpy()
@@ -151,37 +169,21 @@ def train(hyps, verbose=True):
 
             # Tot loss
             logits = logits.reshape(-1,logits.shape[-1])
-            targs = targs.reshape(-1).to(DEVICE)
+            targs = targs.reshape(-1).cuda(non_blocking=True)
             bitmask = targs!=mask_idx
             loss = lossfxn(logits[bitmask],targs[bitmask])
-            if multi_gpu:
-                loss = loss.mean()
 
             loss = loss/hyps['n_loss_loops']
-            loss.backward()
-            if b % hyps['n_loss_loops'] == 0:
+            if hyps['multi_gpu']:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+            if b % hyps['n_loss_loops'] == 0 or b == len(train_loader)-1:
                 optimizer.step()
                 optimizer.zero_grad()
                 step_num += 1
                 scheduler.update_lr(step_num)
-                if step_num%50==0:
-                    checkpt_steps += 1
-                    save_dict = { "epoch":epoch, "hyps":hyps,
-                        "step_num":step_num,
-                        "checkpt_loss":checkpt_loss/checkpt_steps,
-                        "checkpt_acc":checkpt_acc/checkpt_steps,
-                        "state_dict":model.state_dict(),
-                        "optim_dict":optimizer.state_dict(),
-                    }
-                    checkpt_loss = 0; checkpt_acc = 0
-                    save_name = "model_checkpt"
-                    save_name=os.path.join(hyps['save_folder'],
-                                           save_name)
-                    if not test_batch_size:
-                        io.save_checkpt(save_dict,save_name,
-                                              checkpt_steps,
-                                              ext=".pt",
-                                              del_prev_sd=False)
 
             with torch.no_grad():
                 # Acc
@@ -201,10 +203,9 @@ def train(hyps, verbose=True):
             s = "Loss:{:.5f} | Acc:{:.5f} | {:.0f}%"
             s = s.format(loss.item(), acc.item(),
                                       b/len(train_loader)*100)
-            print(s, end=len(s)*" " + "\r")
+            if verbose: print(s, end=len(s)*" " + "\r")
             if hyps['exp_name'] == "test" and b>5: break
 
-        print()
         optimizer.zero_grad()
         train_avg_loss = avg_loss/len(train_loader)
         train_avg_acc = avg_acc/len(train_loader)
@@ -217,106 +218,112 @@ def train(hyps, verbose=True):
 
         ###### VALIDATION
         model.eval()
+        avg_bleu = 0
         avg_loss = 0
         avg_acc = 0
         avg_indy_acc = 0
-        print("Validating...")
+        if verbose: print("\nValidating...")
         torch.cuda.empty_cache()
-        with torch.no_grad():
-            rand_word_batch = int(np.random.randint(0,len(val_loader)))
-            for b,(x,y) in enumerate(val_loader):
-                if test_batch_size:
-                    x,y = val_loader.get_largest_batch(b)
-                targs = y.data[:,1:]
-                og_shape = targs.shape
-                y = y[:,:-1]
-                preds = model(x.to(DEVICE), y.to(DEVICE))
+        if rank==0:
+            with torch.no_grad():
+                rand_word_batch = int(np.random.randint(0,
+                                         len(val_loader)))
+                for b,(x,y) in enumerate(val_loader):
+                    if test_batch_size:
+                        x,y = val_loader.get_largest_batch(b)
+                    targs = y.data[:,1:]
+                    og_shape = targs.shape
+                    y = y[:,:-1]
+                    preds = model(x.cuda(non_blocking=True),
+                                  y.cuda(non_blocking=True))
 
-                # Tot loss and acc
-                preds = preds.reshape(-1,preds.shape[-1])
-                targs = targs.reshape(-1).to(DEVICE)
-                bitmask = targs!=mask_idx
-                loss = lossfxn(preds[bitmask],targs[bitmask])
-                if multi_gpu:
-                    loss = loss.mean()
-                preds = torch.argmax(preds,dim=-1)
-                sl = int(og_shape[-1])
-                eq = (preds==targs).float()
-                indy_acc = eq[bitmask].mean()
-                eq[~bitmask] = 1
-                try:
+                    # Tot loss and acc
+                    preds = preds.reshape(-1,preds.shape[-1])
+                    targs = targs.reshape(-1).cuda(non_blocking=True)
+                    bitmask = targs!=mask_idx
+                    loss = lossfxn(preds[bitmask],targs[bitmask])
+                    if hyps['multi_gpu']:
+                        loss = loss.mean()
+                    preds = torch.argmax(preds,dim=-1)
+                    sl = int(og_shape[-1])
+                    eq = (preds==targs).float()
+                    indy_acc = eq[bitmask].mean()
+                    eq[~bitmask] = 1
                     eq = eq.reshape(og_shape)
                     acc = (eq.sum(-1)==sl).float().mean()
-                except Exception as e:
-                    print("exception:", e)
-                    print("eq:", eq.shape)
-                    print("sl:", sl)
-                    print("eqsum:", eq.sum(-1))
-                    print("==:", (eq.sum(-1)==sl))
-                    print("float", (eq.sum(-1)==sl).float())
-                    print("mean", (eq.sum(-1)==sl).float())
-                avg_acc += acc.item()
-                avg_indy_acc += indy_acc.item()
-                avg_loss += loss.item()
+                    bleu_trgs=targs.reshape(og_shape).data.cpu().numpy()
+                    bleu_prds=preds.reshape(og_shape).data.cpu().numpy()
+                    bleu = corpus_bleu(bleu_trgs[:,None,:],bleu_prds)
+                    avg_bleu += bleu
+                    avg_acc += acc.item()
+                    avg_indy_acc += indy_acc.item()
+                    avg_loss += loss.item()
 
-                if b == rand_word_batch or hyps['exp_name']=="test":
-                    rand = int(np.random.randint(0,len(x)))
-                    inp = x.data[rand].cpu().numpy()
-                    inp_samp = val_data.X_idxs2tokens(inp)
-                    trg=targs.reshape(og_shape)[rand].data.cpu().numpy()
-                    targ_samp = val_data.Y_idxs2tokens(trg)
-                    prd=preds.reshape(og_shape)[rand].data.cpu().numpy()
-                    pred_samp = val_data.Y_idxs2tokens(prd)
-                s = "Loss:{:.5f} | Acc:{:.5f} | {:.0f}%"
-                s = s.format(loss.item(), acc.item(),
-                                          b/len(val_loader)*100)
-                print(s, end=len(s)*" " + "\r")
-                if hyps['exp_name']=="test" and b > 5: break
+                    if b == rand_word_batch or hyps['exp_name']=="test":
+                        rand = int(np.random.randint(0,len(x)))
+                        inp = x.data[rand].cpu().numpy()
+                        inp_samp = val_data.X_idxs2tokens(inp)
+                        trg = targs.reshape(og_shape)[rand].data.cpu()
+                        targ_samp = val_data.Y_idxs2tokens(trg.numpy())
+                        prd = preds.reshape(og_shape)[rand].data.cpu()
+                        pred_samp = val_data.Y_idxs2tokens(prd.numpy())
+                    s="Loss:{:.5f} | Acc:{:.5f} | Bleu:{:.5f} | {:.0f}%"
+                    s = s.format(loss.item(), acc.item(), bleu,
+                                              b/len(val_loader)*100)
+                    if verbose: print(s, end=len(s)*" " + "\r")
+                    if hyps['exp_name']=="test" and b > 5: break
 
-
-        print()
-        val_avg_loss = avg_loss/len(val_loader)
-        val_avg_acc = avg_acc/len(val_loader)
-        val_avg_indy = avg_indy_acc/len(val_loader)
-        stats_string += "Val - Loss:{:.5f} | Acc:{:.5f} | Indy:{:.5f}\n"
-        stats_string = stats_string.format(val_avg_loss,val_avg_acc,
-                                                        val_avg_indy)
-        stats_string += "Inp: "  + inp_samp  + "\n"
-        stats_string += "Targ: " + targ_samp + "\n"
-        stats_string += "Pred: " + pred_samp + "\n"
+            if verbose: print()
+            val_avg_bleu = avg_bleu/len(val_loader)
+            val_avg_loss = avg_loss/len(val_loader)
+            val_avg_acc = avg_acc/len(val_loader)
+            val_avg_indy = avg_indy_acc/len(val_loader)
+            stats_string += "Val- Loss:{:.5f} | Acc:{:.5f} | "
+            stats_string += "Indy:{:.5f}\nVal Bleu: {:.5f}\n"
+            stats_string = stats_string.format(val_avg_loss,val_avg_acc,
+                                                            val_avg_indy,
+                                                            val_avg_bleu)
+            stats_string += "Inp: "  + inp_samp  + "\n"
+            stats_string += "Targ: " + targ_samp + "\n"
+            stats_string += "Pred: " + pred_samp + "\n"
         optimizer.zero_grad()
 
-        save_dict = {
-            "epoch":epoch,
-            "step_num":step_num,
-            "hyps":hyps,
-            "train_loss":train_avg_loss,
-            "train_acc":train_avg_acc,
-            "train_indy":train_avg_indy,
-            "val_loss":val_avg_loss,
-            "val_acc":val_avg_acc,
-            "val_indy":val_avg_indy,
-            "state_dict":model.state_dict(),
-            "optim_dict":optimizer.state_dict(),
-        }
-        save_name = "checkpt"
-        save_name = os.path.join(hyps['save_folder'],save_name)
-        if not test_batch_size:
+        if not test_batch_size and rank==0:
+            save_dict = {
+                "epoch":epoch,
+                "step_num":step_num,
+                "hyps":hyps,
+                "train_loss":train_avg_loss,
+                "train_acc":train_avg_acc,
+                "train_indy":train_avg_indy,
+                "val_bleu":val_avg_bleu,
+                "val_loss":val_avg_loss,
+                "val_acc":val_avg_acc,
+                "val_indy":val_avg_indy,
+                "state_dict":model.state_dict(),
+                "optim_dict":optimizer.state_dict(),
+            }
+            if hyps['multi_gpu']: save_dict['amp_dict']=amp.state_dict()
+            save_name = "checkpt"
+            save_name = os.path.join(hyps['save_folder'],save_name)
             io.save_checkpt(save_dict, save_name, epoch, ext=".pt",
                                 del_prev_sd=hyps['del_prev_sd'])
         stats_string += "Exec time: {}\n".format(time.time()-starttime)
-        print(stats_string)
+        if verbose: print(stats_string)
         s = "Epoch:{} | Model:{}\n".format(epoch, hyps['save_folder'])
         stats_string = s + stats_string
-        log_file = os.path.join(hyps['save_folder'],"training_log.txt")
+        log_file = os.path.join(hyps['save_folder'],
+                                "training_log"+str(rank)+".txt")
         if not test_batch_size:
             with open(log_file,'a') as f:
                 f.write(str(stats_string)+'\n')
-    del save_dict['state_dict']
-    del save_dict['optim_dict']
-    del save_dict['hyps']
-    save_dict['save_folder'] = hyps['save_folder']
-    return save_dict
+    if rank==0:
+        del save_dict['state_dict']
+        del save_dict['optim_dict']
+        del save_dict['hyps']
+        save_dict['save_folder'] = hyps['save_folder']
+        return save_dict
+    return None
 
 def save_data_structs(hyps, structs):
     """
