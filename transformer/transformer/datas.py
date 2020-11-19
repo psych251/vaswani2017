@@ -168,7 +168,7 @@ class EngGerDataset(Dataset):
                     self.en_idxs = np.asarray(temp_idxs)
                     self.en_lens = np.asarray(temp_lens)
                     if rank==0: print("duration:", time.time()-starttime)
-        else:
+        elif world_size == 1:
             self.en_max_len = 0
             self.en_idxs = []
             self.en_lens = []
@@ -200,6 +200,9 @@ class EngGerDataset(Dataset):
                                         rootdir=self.en_lens_path,
                                         dtype="int32")
             self.en_lens.flush()
+        else:
+            print("Make dataset without using multi-processing!!")
+            assert False
         if self.en_max_len > max_context:
             if rank==0:
                 print("Truncating context from", self.en_max_len,
