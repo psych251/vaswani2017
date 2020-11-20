@@ -252,8 +252,15 @@ def train(gpu, hyps, verbose=True):
                     eq = eq.reshape(og_shape)
                     acc = (eq.sum(-1)==sl).float().mean()
                     bleu_trgs=targs.reshape(og_shape).data.cpu().numpy()
+                    trg_ends = np.argmax((bleu_trgs==mask_idx),axis=1)
                     bleu_prds=preds.reshape(og_shape).data.cpu().numpy()
-                    bleu = corpus_bleu(bleu_trgs[:,None,:],bleu_prds)
+                    prd_ends = np.argmax((bleu_prds==mask_idx),axis=1)
+                    btrgs = []
+                    bprds = []
+                    for i in range(len(bleu_trgs)):
+                        btrgs.append(bleu_trgs[i,:trg_ends[i]])
+                        bprds.append(bleu_prds[i,:prd_ends[i]])
+                    bleu = corpus_bleu(btrgs[:,None,:],bprds)
                     avg_bleu += bleu
                     avg_acc += acc.item()
                     avg_indy_acc += indy_acc.item()

@@ -22,6 +22,7 @@ class ECoderBase(nn.Module):
                                                      act_fxn="ReLU",
                                                      prob_embs=False,
                                                      prob_attn=False,
+                                                     drop_p=0,
                                                      **kwargs):
         """
         seq_len: int
@@ -44,6 +45,8 @@ class ECoderBase(nn.Module):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            the dropout probability
         """
         super().__init__()
         self.seq_len = seq_len
@@ -55,6 +58,7 @@ class ECoderBase(nn.Module):
         self.use_mask = use_mask
         self.prob_embs = prob_embs
         self.prob_attn = prob_attn
+        self.drop_p = drop_p
 
 class Encoder(ECoderBase):
     def __init__(self, *args, **kwargs):
@@ -83,11 +87,14 @@ class Encoder(ECoderBase):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            the dropout probability
         """
         super().__init__(*args, **kwargs)
         if self.use_mask:
             print("encoder is using a mask, this is likely undesired!")
 
+        self.dropout = nn.Dropout(self.drop_p)
         self.pos_encoding = PositionalEncoder(self.seq_len,self.emb_size)
         mask = self.get_mask(self.seq_len) if self.use_mask else None
         self.register_buffer("mask",mask)
@@ -98,7 +105,8 @@ class Encoder(ECoderBase):
                                   n_heads=self.n_heads,
                                   act_fxn=self.act_fxn,
                                   prob_embs=self.prob_embs,
-                                  prob_attn=self.prob_attn)
+                                  prob_attn=self.prob_attn,
+                                  drop_p=self.drop_p)
             self.enc_layers.append(block)
 
 
@@ -122,6 +130,7 @@ class Encoder(ECoderBase):
 
         # Encode
         fx = self.pos_encoding(x)
+        fx = self.dropout(fx)
         for i,enc in enumerate(self.enc_layers):
             fx = enc(fx,mask=mask,x_mask=x_mask)
             if self.prob_embs and i < len(self.enc_layers)-1:
@@ -168,6 +177,7 @@ class Decoder(ECoderBase):
                                                 self.use_mask else None
         self.register_buffer("mask", mask)
 
+        self.dropout = nn.Dropout(self.drop_p)
         self.pos_encoding = PositionalEncoder(self.seq_len,
                                               self.emb_size)
         # init_decs is a paradigm in which the decoded vectors all
@@ -188,7 +198,8 @@ class Decoder(ECoderBase):
                                   n_heads=self.n_heads,
                                   act_fxn=self.act_fxn,
                                   prob_attn=self.prob_attn,
-                                  prob_embs=self.prob_embs)
+                                  prob_embs=self.prob_embs,
+                                  drop_p=self.drop_p)
             self.dec_layers.append(block)
 
     def forward(self, x, encs, x_mask=None, enc_mask=None):
@@ -220,6 +231,7 @@ class Decoder(ECoderBase):
             encs = sample_probs(og_encs)
 
         fx = self.pos_encoding(x)
+        fx = self.dropout(fx)
         for i,dec in enumerate(self.dec_layers):
             fx = dec(fx, encs, mask=self.mask, x_mask=x_mask,
                                                enc_mask=enc_mask)
@@ -279,9 +291,14 @@ class Gencoder(ECoderBase):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            dropout probability
         """
         super().__init__(*args, **kwargs)
         self.multi_init = multi_init
+        self.drop_p = drop_p
+
+        self.dropout = nn.Dropout(self.drop_p)
 
         if self.prob_embs: vec_size = 2*self.emb_size
         else: vec_size = self.emb_size
@@ -299,7 +316,8 @@ class Gencoder(ECoderBase):
                               n_heads=self.n_heads,
                               act_fxn=self.act_fxn,
                               prob_embs=self.prob_embs,
-                              prob_attn=self.prob_attn)
+                              prob_attn=self.prob_attn,
+                              drop_p=self.drop_p)
         self.dec_layers.append(block)
         for _ in range(self.n_layers-1):
             block = DecodingBlock(emb_size=self.emb_size,
@@ -307,7 +325,8 @@ class Gencoder(ECoderBase):
                                   n_heads=self.n_heads,
                                   act_fxn=self.act_fxn,
                                   prob_embs=self.prob_embs,
-                                  prob_attn=self.prob_attn)
+                                  prob_attn=self.prob_attn,
+                                  drop_p=self.drop_p)
             self.dec_layers.append(block)
 
     def get_init_vec(self, batch_size):
@@ -338,6 +357,7 @@ class Gencoder(ECoderBase):
             og_y = y
             y = sample_probs(og_y)
         fx = self.pos_encoding(x)
+        fx = self.dropout(fx)
         for dec in self.dec_layers:
             fx = dec(fx,y,x_mask=x_mask,enc_mask=y_mask)
             if self.prob_embs:
@@ -398,10 +418,13 @@ class Attncoder(ECoderBase):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            dropout probability
         """
         super().__init__(*args, **kwargs)
         self.init_decs = init_decs
         self.multi_init = multi_init
+        print("probably want to add positional encoder to attncoder")
 
         if self.prob_embs: vec_size = 2*self.emb_size
         else: vec_size = self.emb_size
@@ -420,7 +443,8 @@ class Attncoder(ECoderBase):
                                   n_heads=self.n_heads,
                                   act_fxn=self.act_fxn,
                                   prob_embs=self.prob_embs,
-                                  prob_attn=self.prob_attn)
+                                  prob_attn=self.prob_attn,
+                                  drop_p=self.drop_p)
             self.attn_layers.append(block)
 
     def get_init_vec(self, batch_size):
@@ -521,10 +545,15 @@ class AppendEncoder(ECoderBase):
         multi_init: bool
             if true, the initialization vector has a unique value for
             each slot in the generated sequence
+        drop_p: float
+            dropout probability
         """
         super().__init__(*args, **kwargs)
         self.state_size = state_size
         self.multi_init = multi_init
+
+        self.dropout = nn.Dropout(self.drop_p)
+
         if self.use_mask:
             print("AppendEncoder is using a mask!!")
 
@@ -548,7 +577,8 @@ class AppendEncoder(ECoderBase):
                                   n_heads=self.n_heads,
                                   act_fxn=self.act_fxn,
                                   prob_embs=self.prob_embs,
-                                  prob_attn=self.prob_attn)
+                                  prob_attn=self.prob_attn,
+                                  drop_p=self.drop_p)
             self.enc_layers.append(block)
 
     def forward(self,x,x_mask=None):
@@ -572,6 +602,7 @@ class AppendEncoder(ECoderBase):
         if self.prob_embs:
             x = sample_probs(x)
         fx = self.pos_encoding(x)
+        fx = self.dropout(fx)
         for i,enc in enumerate(self.enc_layers):
             fx = enc(fx,mask=mask,x_mask=x_mask)
             if self.prob_embs and i < len(self.enc_layers)-1:
@@ -787,7 +818,8 @@ class Transformer(TransformerBase):
                                             use_mask=self.enc_mask,
                                             act_fxn=self.act_fxn,
                                             prob_attn=self.prob_attn,
-                                            prob_embs=self.prob_embs)
+                                            prob_embs=self.prob_embs,
+                                            drop_p=self.enc_drop_p)
 
         self.use_mask = not self.init_decs and self.ordered_preds
         if self.init_decs:
@@ -801,7 +833,8 @@ class Transformer(TransformerBase):
                                             init_decs=self.init_decs,
                                             multi_init=self.multi_init,
                                             prob_attn=self.prob_attn,
-                                            prob_embs=self.prob_embs)
+                                            prob_embs=self.prob_embs,
+                                            drop_p=self.dec_drop_p)
 
         self.classifier = Classifier(self.emb_size,
                                      self.n_vocab_out,
@@ -809,8 +842,6 @@ class Transformer(TransformerBase):
                                      bnorm=self.class_bnorm,
                                      drop_p=self.class_drop_p,
                                      act_fxn=self.act_fxn)
-        self.enc_dropout = nn.Dropout(self.enc_drop_p)
-        self.dec_dropout = nn.Dropout(self.dec_drop_p)
 
     def forward(self, x, y, x_mask=None, y_mask=None, ret_latns=False):
         """
@@ -830,7 +861,6 @@ class Transformer(TransformerBase):
         else:
             embs = x
         encs = self.encoder(embs,x_mask=x_mask)
-        encs = self.enc_dropout(encs)
         # Teacher force
         if self.training or not self.use_mask:
             return self.teacher_force_fwd(encs,y,x_mask,y_mask,
@@ -855,7 +885,6 @@ class Transformer(TransformerBase):
                 decs = self.decoder(dembs, encs, x_mask=temp_mask,
                                                  enc_mask=x_mask)
                 decs = decs[:,-1:] # only take the latest element
-                decs = self.dec_dropout(decs)
                 decs = decs.reshape(-1,decs.shape[-1])
                 preds = self.classifier(decs)
                 preds = preds.reshape(len(y),1,preds.shape[-1])
@@ -884,7 +913,6 @@ class Transformer(TransformerBase):
             dembs = y
         decs = self.decoder(dembs, encs, x_mask=y_mask,
                                          enc_mask=x_mask)
-        decs = self.dec_dropout(decs)
         decs = decs.reshape(-1,decs.shape[-1])
         preds = self.classifier(decs)
         preds = preds.reshape(len(y),y.shape[1],preds.shape[-1])

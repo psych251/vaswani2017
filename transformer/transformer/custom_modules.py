@@ -158,7 +158,8 @@ class EncodingBlock(nn.Module):
     def __init__(self, emb_size, attn_size, n_heads=8,
                                             act_fxn="ReLU",
                                             prob_embs=False,
-                                            prob_attn=False):
+                                            prob_attn=False,
+                                            drop_p=0):
         """
         emb_size: int
             the size of the embeddings
@@ -175,6 +176,8 @@ class EncodingBlock(nn.Module):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            dropout probability
         """
         super().__init__()
         self.emb_size = emb_size
@@ -182,6 +185,9 @@ class EncodingBlock(nn.Module):
         self.n_heads = n_heads
         self.prob_embs = prob_embs
         self.prob_attn = prob_attn
+        self.drop_p = drop_p
+
+        self.dropout = nn.Dropout(self.drop_p)
 
         self.norm0 = nn.LayerNorm((emb_size,))
         self.multi_attn = MultiHeadAttention(emb_size=emb_size,
@@ -210,8 +216,10 @@ class EncodingBlock(nn.Module):
         """
         x = self.norm0(x)
         fx = self.multi_attn(q=x,k=x,v=x,mask=mask)
+        fx = self.dropout(fx)
         x = self.norm1(fx+x)
         fx = self.fwd_net(x)
+        fx = self.dropout(fx)
         fx = self.norm2(fx+x)
         if self.prob_embs:
             fx = self.proj(fx)
@@ -221,7 +229,8 @@ class DecodingBlock(nn.Module):
     def __init__(self, emb_size, attn_size, n_heads=8,
                                             act_fxn="ReLU",
                                             prob_embs=False,
-                                            prob_attn=False):
+                                            prob_attn=False,
+                                            drop_p=0):
         """
         emb_size: int
             the size of the embeddings
@@ -238,12 +247,17 @@ class DecodingBlock(nn.Module):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            the size of the dropout
         """
         super().__init__()
         self.emb_size = emb_size
         self.attn_size = attn_size
         self.prob_embs = prob_embs
         self.prob_attn = prob_attn
+        self.drop_p = drop_p
+
+        self.dropout = nn.Dropout(self.drop_p)
 
         self.norm0 = nn.LayerNorm((emb_size,))
         self.multi_attn1 = MultiHeadAttention(emb_size=emb_size,
@@ -288,12 +302,15 @@ class DecodingBlock(nn.Module):
         fx = self.multi_attn1(q=x,k=x,v=x,mask=mask,
                                           q_mask=x_mask,
                                           k_mask=x_mask)
+        fx = self.dropout(fx)
         x = self.norm1(fx+x)
         fx = self.multi_attn2(q=x,k=encs,v=encs, mask=None,
                                                  q_mask=x_mask,
                                                  k_mask=enc_mask)
+        fx = self.dropout(fx)
         x = self.norm2(fx+x)
         fx = self.fwd_net(x)
+        fx = self.dropout(fx)
         fx = self.norm3(fx+x)
         if self.prob_embs:
             fx = self.proj(fx)
@@ -307,7 +324,8 @@ class GencodingBlock(nn.Module):
     def __init__(self, emb_size, attn_size, n_heads=8,
                                             act_fxn="ReLU",
                                             prob_embs=False,
-                                            prob_attn=False):
+                                            prob_attn=False,
+                                            drop_p=0):
         """
         emb_size: int
             the size of the embeddings
@@ -324,12 +342,17 @@ class GencodingBlock(nn.Module):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            dropout probability
         """
         super().__init__()
         self.emb_size = emb_size
         self.attn_size = attn_size
         self.prob_attn = prob_attn
         self.prob_embs = prob_embs
+        self.drop_p = drop_p
+
+        self.dropout = nn.Dropout(self.drop_p)
 
         self.norm1 = nn.LayerNorm((emb_size,))
 
@@ -365,8 +388,10 @@ class GencodingBlock(nn.Module):
         fx = self.multi_attn2(q=x,k=encs,v=encs,mask=mask,
                                                 q_mask=x_mask,
                                                 k_mask=enc_mask)
+        fx = self.dropout(fx)
         x = self.norm2(fx+x)
         fx = self.fwd_net(x)
+        fx = self.dropout(fx)
         fx = self.norm3(fx+x)
         if self.prob_embs:
             fx = self.proj(fx)
@@ -381,7 +406,8 @@ class AttnBlock(nn.Module):
     def __init__(self, emb_size, attn_size, n_heads=8,
                                             act_fxn="ReLU",
                                             prob_embs=False,
-                                            prob_attn=False):
+                                            prob_attn=False,
+                                            drop_p=0):
         """
         emb_size: int
             the size of the embeddings
@@ -398,12 +424,17 @@ class AttnBlock(nn.Module):
         prob_attn: bool
             if true, the queries and keys are projected into a
             gaussian parameter vectors space and sampled
+        drop_p: float
+            dropout probability
         """
         super().__init__()
         self.emb_size = emb_size
         self.attn_size = attn_size
         self.prob_embs = prob_embs
         self.prob_attn = prob_attn
+        self.drop_p = drop_p
+
+        self.dropout = nn.Dropout(self.drop_p)
 
         self.norm1 = nn.LayerNorm((emb_size,))
         self.multi_attn1 = MultiHeadAttention(emb_size=emb_size,
@@ -445,8 +476,10 @@ class AttnBlock(nn.Module):
         fx = self.multi_attn1(q=x,k=encs,v=encs, mask=None,
                                                   q_mask=x_mask,
                                                   k_mask=enc_mask)
-        fx = self.norm2(fx+x)
-        fx = self.fwd_net(fx)
+        fx = self.dropout(fx)
+        x = self.norm2(fx+x)
+        fx = self.fwd_net(x)
+        fx = self.dropout(fx)
         fx = self.norm3(fx+x)
         if self.prob_embs:
             fx = self.proj(fx)

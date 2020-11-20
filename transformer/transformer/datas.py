@@ -321,9 +321,9 @@ class EngGerDataset(Dataset):
     def __getitem__(self,i,l=None):
         if l is None:
             l = self.X_lens[int(i)]
-        idxs = []
+        idxs = np.zeros(1)
         margin = 5
-        while len(idxs)<25 and margin < 400:
+        while idxs.sum()<25 and margin < 400:
             min_l = l-margin
             max_l = l+margin
             idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
@@ -337,9 +337,11 @@ class EngGerDataset(Dataset):
         elif max_l < 160: batch_size = self.batch_size//32
         else: batch_size = self.batch_size//64
         batch_size = max(16,batch_size)
-        perm = np.random.permutation(len(idxs))
-        x = np.asarray(self.X[perm[:batch_size],:max_l])
-        y = np.asarray(self.Y[perm[:batch_size],:max_l])
+        perm = np.random.permutation(idxs.sum())[:batch_size]
+        max_l = np.max(self.X_lens[idxs][perm])
+        x = np.asarray(self.X[idxs][perm,:max_l])
+        max_l = np.max(self.Y_lens[idxs][perm])
+        y = np.asarray(self.Y[idxs][perm,:max_l])
         return torch.LongTensor(x), torch.LongTensor(y)
 
     def get_largest_batch(self, size_num):
