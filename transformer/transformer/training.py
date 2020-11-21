@@ -130,6 +130,7 @@ def train(gpu, hyps, verbose=True):
     if hyps['exp_name'] == "test":
         hyps['n_epochs'] = 2
     mask_idx = train_data.Y_mask_idx
+    stop_idx = train_data.Y_stop_idx
     step_num = 0 if checkpt is None else try_key(checkpt,'step_num',0)
     checkpt_steps = 0
     if verbose: print()
@@ -252,15 +253,16 @@ def train(gpu, hyps, verbose=True):
                     eq = eq.reshape(og_shape)
                     acc = (eq.sum(-1)==sl).float().mean()
                     bleu_trgs=targs.reshape(og_shape).data.cpu().numpy()
-                    trg_ends = np.argmax((bleu_trgs==mask_idx),axis=1)
+                    trg_ends = np.argmax((bleu_trgs==stop_idx),axis=1)
                     bleu_prds=preds.reshape(og_shape).data.cpu().numpy()
-                    prd_ends = np.argmax((bleu_prds==mask_idx),axis=1)
+                    prd_ends = np.argmax((bleu_prds==stop_idx),axis=1)
                     btrgs = []
                     bprds = []
                     for i in range(len(bleu_trgs)):
-                        btrgs.append(bleu_trgs[i,:trg_ends[i]])
-                        bprds.append(bleu_prds[i,:prd_ends[i]])
-                    bleu = corpus_bleu(btrgs[:,None,:],bprds)
+                        temp = bleu_trgs[i,None,:trg_ends[i]].tolist()
+                        btrgs.append(temp)
+                        bprds.append(bleu_prds[i,:prd_ends[i]].tolist())
+                    bleu = corpus_bleu(btrgs,bprds)
                     avg_bleu += bleu
                     avg_acc += acc.item()
                     avg_indy_acc += indy_acc.item()
