@@ -1,6 +1,6 @@
 {
-    "exp_name":"vocabsize",
-    "resume_folder":"",
+    "exp_name":"placeholder",
+    "resume_folder":"/data2/pdplab/grantsrb/transformer/fixedidxs/fixedidxs_0_lr0.00025",
     "save_root":"/data2/pdplab/grantsrb/transformer",
     "description":"",
     "del_prev_sd":true,
@@ -37,14 +37,14 @@
     "act_fxn":"ReLU",
 
     "lr":0.00025,
-    "l2":0.001,
+    "l2":0,
     "drop_p":0,
     "class_drop_p":0,
-    "enc_drop_p":0,
-    "dec_drop_p":0,
+    "enc_drop_p":0.1,
+    "dec_drop_p":0.1,
     "n_epochs":200,
-    "batch_size":128,
-    "max_context":128,
+    "batch_size":32,
+    "max_context":200,
     "n_loss_loops":1,
 
     "test_batch_size":false
