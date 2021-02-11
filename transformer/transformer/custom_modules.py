@@ -124,7 +124,7 @@ class MultiHeadAttention(nn.Module):
 
         batch,seq_q = q.shape[:2]
         fq = fq.reshape(batch, seq_q, self.n_heads, self.qk_attn_size) 
-        fq = fq.permute(0,2,1,3) # (B,H,Sq, A)
+        fq = fq.permute(0,2,1,3) # (B,H,Sq,A)
 
         batch,seq_k = k.shape[:2]
         fk = fk.reshape(batch, seq_k, self.n_heads, self.qk_attn_size) 
@@ -137,7 +137,8 @@ class MultiHeadAttention(nn.Module):
             fk = sample_probs(fk,dim=-2)
             fq = sample_probs(fq)
 
-        f = torch.matmul(fq,fk)/np.sqrt(self.attn_size) # (B,H,Sq,Sk)
+        div = float(np.sqrt(self.attn_size))
+        f = torch.matmul(fq,fk)/div # (B,H,Sq,Sk)
         if mask is not None:
             row,col = f.shape[-2:]
             f = f + mask[:row,:col]
