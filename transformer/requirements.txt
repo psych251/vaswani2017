@@ -3,4 +3,6 @@ torch
 tqdm
 psutil
 h5py
-skimage
+scikit-image
+bcolz
+tokenizers
