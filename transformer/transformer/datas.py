@@ -414,6 +414,265 @@ class VariableLengthSeqLoader:
     def get_largest_batch(self, b):
         return self.dataset.get_largest_batch(b)
 
+class EngGerNewstest(Dataset):
+    """
+    The newstest 2014 dataset used for testing
+    """
+    def __init__(self, data_folder, rank=0,
+                                    val_set=False,
+                                    world_size=1,
+                                    seed=0,
+                                    eng_to_ger=True,
+                                    vocab_size=37000,
+                                    MASK="<MASK>",
+                                    START="<START>",
+                                    STOP="<STOP>",
+                                    exp_name="",
+                                    max_context=None,
+                                    batch_size=128,
+                                    val_size=30000,
+                                    **kwargs):
+        """
+        rank: int
+            the rank in the distributed training
+        val_set: bool
+            if true, this dataset is created as the validation set
+        world_size: int
+            the number of processes if using distributed training
+        seed: int
+            random seed
+        data_folder: str
+            the path to the folder that should contain a `train.en` and
+            a `train.de` file.
+        eng_to_ger: bool
+            if true, the x values are returned as english ids and the
+            y values are german ids. If false, then visa-versa
+        vocab_size: int
+            the number of encodings for the byte-pair encoding scheme
+        MASK: str
+            the mask token
+        START: str
+            the start token
+        STOP: str
+            the stop token
+        exp_name: str
+            name of the experiment
+        max_context: int
+            the maximum sequence length
+        val_size: int
+            the number of samples to be set aside for validation
+        """
+        self.rank = rank
+        print("rank:", self.rank)
+        self.world_size = world_size
+        self.val_set = val_set
+        self.val_size = val_size
+        self.batch_size = batch_size
+        self.data_folder = os.path.expanduser(data_folder)
+        self.en_path = os.path.join(data_folder, "newstest2014.en")
+        self.de_path = os.path.join(data_folder, "newstest2014.de")
+        self.eng_to_ger = eng_to_ger
+        self.vocab_size = vocab_size
+        self.MASK = MASK
+        self.START = START
+        self.STOP = STOP
+        self.max_context = max_context
+        self.en_tok_path = os.path.join(self.data_folder,"en_tokenizer")
+        self.de_tok_path = os.path.join(self.data_folder,"de_tokenizer")
+        self.en_arr_path = os.path.join(self.data_folder,"en_bcolz")
+        self.de_arr_path = os.path.join(self.data_folder,"de_bcolz")
+        self.en_lens_path = os.path.join(self.data_folder,"en_bcolz_lens")
+        self.de_lens_path = os.path.join(self.data_folder,"de_bcolz_lens")
+
+        # Train tokenizers
+        if rank==0: print("Tokenizing english..")
+        self.en_tokenizer = CharBPETokenizer()
+        if os.path.exists(self.en_tok_path): # Load trained tokenizer
+            if rank==0:
+                print("loading from pretrained tokenizer",
+                                         self.en_tok_path)
+            self.en_tokenizer = ml_utils.datas.load_tokenizer(
+                                               self.en_tokenizer,
+                                               self.en_tok_path)
+        else:
+            self.en_tokenizer.train([self.en_path],vocab_size=vocab_size)
+            os.mkdir(self.en_tok_path)
+            self.en_tokenizer.save_model(self.en_tok_path)
+        self.en_tokenizer.add_special_tokens([self.MASK])
+        self.en_tokenizer.add_tokens([self.START])
+        self.en_tokenizer.add_tokens([self.STOP])
+        self.en_mask_idx = self.en_tokenizer.token_to_id(self.MASK)
+        self.en_start_idx = self.en_tokenizer.token_to_id(self.START)
+        self.en_stop_idx = self.en_tokenizer.token_to_id(self.STOP)
+
+        if rank==0: print("Tokenizing german..")
+        self.de_tokenizer = CharBPETokenizer()
+        if os.path.exists(self.de_tok_path): # Load trained tokenizer
+            if rank==0:
+                print("loading from pretrained tokenizer",
+                                         self.de_tok_path)
+            self.de_tokenizer = ml_utils.datas.load_tokenizer(
+                                               self.de_tokenizer,
+                                               self.de_tok_path)
+        else:
+            self.de_tokenizer.train([self.de_path],vocab_size=vocab_size)
+            os.mkdir(self.de_tok_path)
+            self.de_tokenizer.save_model(self.de_tok_path)
+        self.de_tokenizer.add_special_tokens([self.MASK])
+        self.de_tokenizer.add_tokens([self.START])
+        self.de_tokenizer.add_tokens([self.STOP])
+        self.de_mask_idx = self.de_tokenizer.token_to_id(self.MASK)
+        self.de_start_idx = self.de_tokenizer.token_to_id(self.START)
+        self.de_stop_idx = self.de_tokenizer.token_to_id(self.STOP)
+
+        # Get English sentence lists
+        if rank==0: print("Making english idxs")
+        self.en_max_len = 0
+        self.en_idxs = []
+        self.en_lens = []
+        with open(self.en_path, 'r') as f:
+            for i,l in tqdm(enumerate(f.readlines())):
+                l = l.strip()
+                if len(l) > 0:
+                    output = self.en_tokenizer.encode(l)
+                    ids = [self.en_start_idx]+list(output.ids)\
+                                             +[self.en_stop_idx]
+                    self.en_idxs.append(ids)
+                    self.en_lens.append(len(ids))
+                    if len(ids) > self.en_max_len:
+                        self.en_max_len = len(ids)
+                if exp_name == "test" and i > 100:
+                    break
+        mask = [self.en_mask_idx for i in range(self.en_max_len)]
+        l = 0
+        if rank==0: print("Padding english idxs")
+        for i in tqdm(range(len(self.en_idxs))):
+            diff = self.en_max_len - len(self.en_idxs[i])
+            self.en_idxs[i] = self.en_idxs[i] + mask[:diff]
+
+        # Get German Sentence Lists
+        if rank==0: print("Making german idxs")
+        self.de_max_len = 0
+        self.de_idxs = []
+        self.de_lens = []
+        with open(self.de_path, 'r') as f:
+            for i,l in tqdm(enumerate(f.readlines())):
+                l = l.strip()
+                if len(l) > 0:
+                    output = self.de_tokenizer.encode(l)
+                    ids = [self.de_start_idx]+list(output.ids)\
+                                             +[self.de_stop_idx]
+                    self.de_idxs.append(ids)
+                    self.de_lens.append(len(ids))
+                    if len(ids) > self.de_max_len:
+                        self.de_max_len = len(ids)
+                if exp_name == "test" and i > 100:
+                    break
+        mask = [self.de_mask_idx for i in range(self.de_max_len)]
+        if rank==0: print("Padding german idxs")
+        for i in tqdm(range(len(self.de_idxs))):
+            diff = self.de_max_len - len(self.de_idxs[i])
+            self.de_idxs[i] = self.de_idxs[i] + mask[:diff]
+
+        if rank==0: print("Converting to numpy arrays")
+        if self.eng_to_ger:
+            self.X = np.asarray(self.en_idxs)
+            self.X_lens = np.asarray(self.en_lens)
+            self.X_tokenizer = self.en_tokenizer
+            self.X_mask_idx = self.en_mask_idx
+            self.X_start_idx = self.en_start_idx
+            self.X_stop_idx = self.en_stop_idx
+            self.X_max_len = self.en_max_len
+
+            self.Y = np.asarray(self.de_idxs)
+            self.Y_lens = np.asarray(self.de_lens)
+            self.Y_tokenizer = self.de_tokenizer
+            self.Y_mask_idx = self.de_mask_idx
+            self.Y_start_idx = self.de_start_idx
+            self.Y_stop_idx = self.de_stop_idx
+            self.Y_max_len = self.de_max_len
+        else:
+            self.X = np.asarray(self.de_idxs)
+            self.X_lens = np.asarray(self.de_lens)
+            self.X_tokenizer = self.de_tokenizer
+            self.X_mask_idx = self.de_mask_idx
+            self.X_start_idx = self.de_start_idx
+            self.X_stop_idx = self.de_stop_idx
+            self.X_max_len = self.de_max_len
+
+            self.Y = np.asarray(self.en_idxs)
+            self.Y_lens = np.asarray(self.en_lens)
+            self.Y_tokenizer = self.en_tokenizer
+            self.Y_mask_idx = self.en_mask_idx
+            self.Y_start_idx = self.en_start_idx
+            self.Y_stop_idx = self.en_stop_idx
+            self.Y_max_len = self.en_max_len
+
+    def __len__(self):
+        return len(self.en_idxs)
+    
+    #def __getitem__(self,i,l=None):
+    #    if l is None:
+    #        l = self.X_lens[int(i)]
+    #    idxs = np.zeros(1)
+    #    margin = 5
+    #    while idxs.sum()<25 and margin < 400:
+    #        min_l = l-margin
+    #        max_l = l+margin
+    #        idxs = (self.X_lens>min_l)&(self.X_lens<max_l)
+    #        margin += 5
+    #    max_l = min(np.max(self.X_lens[idxs]),self.max_context)
+    #    if max_l <   50 : batch_size = self.batch_size
+    #    elif max_l < 70: batch_size = self.batch_size//2
+    #    elif max_l < 100: batch_size = self.batch_size//4
+    #    elif max_l < 120: batch_size = self.batch_size//8
+    #    elif max_l < 140: batch_size = self.batch_size//16
+    #    elif max_l < 160: batch_size = self.batch_size//32
+    #    else: batch_size = self.batch_size//64
+    #    batch_size = max(16,batch_size)
+    #    perm = np.random.permutation(idxs.sum())[:batch_size]
+    #    max_l = np.max(self.X_lens[idxs][perm])
+    #    x = np.asarray(self.X[idxs][perm,:max_l])
+    #    max_l = np.max(self.Y_lens[idxs][perm])
+    #    y = np.asarray(self.Y[idxs][perm,:max_l])
+    #    return torch.LongTensor(x), torch.LongTensor(y)
+
+    def __getitem__(self,idx):
+        return torch.LongTensor(self.X[idx]), torch.LongTensor(self.Y[idx])
+
+    def get_largest_batch(self, size_num):
+        l = 10
+        if size_num == 1:
+            l = 25
+        elif size_num == 2:
+            l = 400
+        elif size_num == 3:
+            l = 130
+        elif size_num == 4:
+            l = 75
+        elif size_num == 5:
+            l = 44
+        elif size_num == 6:
+            l = 94
+        elif size_num == 7:
+            l = 200
+        elif size_num == 8:
+            l = 300
+        return self.__getitem__(0,l)
+
+    def X_idxs2tokens(self, idxs):
+        """
+        idxs: LongTensor (N,)
+            converts an array of tokens to a sentence
+        """
+        return self.X_tokenizer.decode(idxs)
+
+    def Y_idxs2tokens(self, idxs):
+        """
+        idxs: LongTensor (N,)
+            converts an array of tokens to a sentence
+        """
+        return self.Y_tokenizer.decode(idxs)
 class DatasetWrapper(Dataset):
     """
     Used as a wrapper class to more easily split a dataset into a
