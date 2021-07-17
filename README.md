@@ -1,16 +1,3 @@
----
-title: "Reproducibility Report for Attention is All You Need by Vaswani et. al. (2017, NIPS Proceedings)"
-author: "Satchel Grant (grantsrb@stanford.edu)"
-date: "`r format(Sys.time(), '%B %d, %Y')`"
-output:
-  html_document:
-    toc: yes
-    toc_depth: 3
-    toc_float:
-      collapsed: false
----
-
-<!-- Reproducibility reports should all use this template to standardize reporting across projects. These reports will be public supplementary materials that accompany the summary report(s) of the aggregate results. -->
 ## Introduction
 
 Attention is All You Need introduces an algorithm for sequence to sequence modeling that serves as the basis for much of the recent successes in language modeling (Brown 2020), image to sequence tasks (Herdade 2019), and zero shot learning in language domains (Brown 2020). The attention mechanism introduced in the paper also has been used to improve Reinforcement Learning algorithms giving them more selective resource allocation (Mott 2019). The specific results that I want to recreate are the performances for the base model in tables 2 and 3 from the paper (Vaswani 2017).
